@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "archetype",
+  "version": "${version}",
+  "name": "Archetype",
+  "description": "Manifest-authored classes and abilities",
+  "license": "MPL-2.0",
+  "environment": "*",
+  "entrypoints": {
+    "main": [{"adapter": "kotlin", "value": "dev.archetype.minecraft.ArchetypeMod"}],
+    "client": [{"adapter": "kotlin", "value": "dev.archetype.client.ArchetypeClient"}]
+  },
+  "depends": {
+    "fabricloader": ">=0.19.5",
+    "minecraft": "~26.2",
+    "java": ">=25",
+    "fabric-api": "*",
+    "fabric-language-kotlin": ">=1.14.1"
+  }
+}

@@ -1,6 +1,6 @@
 # Concrete design review
 
-Status: Q1-Q85 are accepted. The [manifest specification](manifest-spec.md) and [module design](architecture.md) are the accepted design baseline. The user additionally required broad out-of-the-box coverage for complex abilities without routine Kotlin changes. [ability-coverage.md](ability-coverage.md) makes that requirement concrete. Implementation has not started.
+Status: Q1-Q85 are accepted. The [manifest specification](manifest-spec.md) and [module design](architecture.md) are the accepted design baseline. The user additionally required broad out-of-the-box coverage for complex abilities without routine Kotlin changes. [ability-coverage.md](ability-coverage.md) makes that requirement concrete. [implementation-status.md](implementation-status.md) tracks current implementation.
 
 ## Accepted final round
 

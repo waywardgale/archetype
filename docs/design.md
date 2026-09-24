@@ -1,8 +1,8 @@
 # Archetype design interview
 
-Status: consolidated design. Q1-Q85 and the requirement for broad manifest-only complex-ability coverage are accepted. The design is ready for shared-understanding confirmation before implementation.
+Status: accepted v1 design contract. Q1-Q85 and broad manifest-only complex-ability coverage are accepted. Implementation has started; [implementation-status.md](implementation-status.md) tracks current code coverage.
 
-The authoring contract is in [manifest-spec.md](manifest-spec.md), the five-module design is in [architecture.md](architecture.md), and [ability-coverage.md](ability-coverage.md) defines the required built-ins and 16 composition scenarios. [design-review.md](design-review.md) records the accepted final round. There is no implementation yet.
+The authoring contract is in [manifest-spec.md](manifest-spec.md), the five-module design is in [architecture.md](architecture.md), and [ability-coverage.md](ability-coverage.md) defines the required built-ins and 16 composition scenarios. [design-review.md](design-review.md) records the accepted final round.
 
 ## Stated constraints
 

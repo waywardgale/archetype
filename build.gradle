@@ -1,0 +1,43 @@
+plugins {
+    id 'net.fabricmc.fabric-loom' version "${loom_version}"
+    id 'org.jetbrains.kotlin.jvm' version '2.4.20'
+}
+
+version = project.mod_version
+group = project.maven_group
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${project.minecraft_version}"
+    implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+    implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+    implementation "net.fabricmc:fabric-language-kotlin:${project.fabric_kotlin_version}"
+    implementation 'org.snakeyaml:snakeyaml-engine:2.10'
+    include 'org.snakeyaml:snakeyaml-engine:2.10'
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.12.2'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.withType(JavaCompile).configureEach { options.release = 25 }
+kotlin { jvmToolchain(25) }
+
+tasks.withType(Test).configureEach { useJUnitPlatform() }
+
+jar {
+    from('LICENSE') { rename { 'LICENSE_archetype' } }
+}
+
+processResources {
+    inputs.property 'version', project.version
+    filesMatching('fabric.mod.json') { expand version: project.version }
+}
+
+tasks.register('validatePacks', JavaExec) {
+    dependsOn classes
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'dev.archetype.authoring.ValidatePacksKt'
+    args providers.gradleProperty('packs').orElse('run/world/archetype/packs').get()
+}

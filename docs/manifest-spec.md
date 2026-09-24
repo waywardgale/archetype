@@ -1,6 +1,6 @@
 # Manifest specification
 
-Status: accepted design baseline under Q81-Q85, expanded by the complex-ability coverage requirement. [ability-coverage.md](ability-coverage.md) defines the required v1 composition capabilities and mechanic scenarios. Nothing here is a shipped parser or bundled class. Examples are isolated documentation fragments, not a required class roster or a pack installed into a world.
+Status: accepted design baseline under Q81-Q85, expanded by the complex-ability coverage requirement. [ability-coverage.md](ability-coverage.md) defines the required v1 composition capabilities and mechanic scenarios. The current parser implements a subset, listed in [implementation-status.md](implementation-status.md). Examples are isolated documentation fragments, not a required class roster or a pack installed into a world.
 
 ## Common authoring shape
 

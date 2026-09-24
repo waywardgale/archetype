@@ -1,6 +1,6 @@
 # Module design
 
-Status: accepted design baseline under Q81-Q85, expanded by the complex-ability coverage requirement. This describes a Kotlin/Fabric implementation of the accepted policies, not code already present in the repository. Start with one mod project and package-level modules; separate build projects only when a concrete distribution or dependency need appears.
+Status: accepted design baseline under Q81-Q85, expanded by the complex-ability coverage requirement. The initial Kotlin/Fabric implementation covers a subset; [implementation-status.md](implementation-status.md) lists current coverage. Keep one mod project and package-level modules unless a concrete distribution or dependency need appears.
 
 ## Five modules
 
