@@ -24,7 +24,7 @@ sealed interface Numeric {
     data class Expression(val source: String) : Numeric
 }
 
-sealed interface Effect {
+interface Effect {
     val resultName: String?
     data class Heal(val target: EffectTarget, val amount: Numeric, override val resultName: String?) : Effect
     data class Damage(val target: EffectTarget, val amount: Numeric, val damageType: String, override val resultName: String?) : Effect
@@ -33,6 +33,9 @@ sealed interface Effect {
     data class Delay(val ticks: Int, val effects: List<Effect>) : Effect { override val resultName: String? = null }
     data class Repeat(val count: Int, val everyTicks: Int, val effects: List<Effect>) : Effect { override val resultName: String? = null }
     data class Branch(val condition: Condition, val onTrue: List<Effect>, val onFalse: List<Effect>) : Effect { override val resultName: String? = null }
+    data class ForEach(val origin: SpatialTarget, val selector: Selector, val effects: List<Effect>) : Effect { override val resultName: String? = null }
+    data class Chain(val maxTargets: Int, val hopRange: Double, val delayTicks: Int, val revisit: Boolean, val selector: Selector, val effects: List<Effect>) : Effect { override val resultName: String? = null }
+    data class CreateArea(val area: String, val anchor: Anchor) : Effect { override val resultName: String? = null }
 }
 
 sealed interface Condition {
@@ -40,15 +43,7 @@ sealed interface Condition {
     data class Compare(val left: Numeric, val operator: String, val right: Numeric) : Condition
 }
 
-fun Effect.descendants(): Sequence<Effect> = sequence {
-    yield(this@descendants)
-    when (val effect = this@descendants) {
-        is Effect.Delay -> effect.effects.forEach { yieldAll(it.descendants()) }
-        is Effect.Repeat -> effect.effects.forEach { yieldAll(it.descendants()) }
-        is Effect.Branch -> (effect.onTrue + effect.onFalse).forEach { yieldAll(it.descendants()) }
-        else -> Unit
-    }
-}
+fun Effect.descendants(): Sequence<Effect> = BuiltinEffects.catalog.descendants(this)
 
 enum class EffectTarget { ACTOR, TARGET }
 enum class Activation { ACTIVATED, PASSIVE }
@@ -60,6 +55,20 @@ data class AbilityDef(
     val cooldownTicks: Int,
     val costs: List<Cost>,
     val effects: List<Effect>,
+    val targeting: Targeting = Targeting(),
+)
+
+data class AreaDef(
+    val id: String,
+    val shape: Shape,
+    val durationTicks: Int,
+    val sampleTicks: Int,
+    val selector: Selector,
+    val enter: List<Effect>,
+    val periodic: List<Effect>,
+    val periodicTicks: Int,
+    val exit: List<Effect>,
+    val expired: List<Effect>,
 )
 
 data class Grant(val name: String, val slot: String?, val ability: AbilityDef)
@@ -71,6 +80,7 @@ data class DefinitionSet(
     val abilities: Map<String, AbilityDef>,
     val classes: Map<String, ClassDef>,
     val fingerprint: String,
+    val areas: Map<String, AreaDef> = emptyMap(),
 )
 
 sealed interface CompileResult {

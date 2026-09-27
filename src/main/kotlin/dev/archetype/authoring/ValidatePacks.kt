@@ -25,7 +25,7 @@ fun main(args: Array<String>) {
         is CompileResult.Valid -> {
             val definitions = result.definitions
             val grants = definitions.classes.values.sumOf { it.grants.size }
-            println("Valid: ${definitions.packs.size} packs, ${definitions.classes.size} classes, ${definitions.abilities.size} named abilities, $grants grants, ${definitions.resources.size} resources")
+            println("Valid: ${definitions.packs.size} packs, ${definitions.classes.size} classes, ${definitions.abilities.size} named abilities, $grants grants, ${definitions.resources.size} resources, ${definitions.areas.size} areas")
             println("Native registry and world checks require server validation.")
         }
     }

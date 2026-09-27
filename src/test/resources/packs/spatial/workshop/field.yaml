@@ -1,0 +1,16 @@
+kind: area
+id: restoring_field
+shape: {type: sphere, radius: 4}
+duration: 8s
+sample_every: 100ms
+targets:
+  type: living_entities
+  include_actor: true
+  limit: 16
+  filters: [{type: relation, is: ally}]
+periodic:
+  every: 1s
+  effects:
+    - type: heal
+      target: target
+      amount: 2

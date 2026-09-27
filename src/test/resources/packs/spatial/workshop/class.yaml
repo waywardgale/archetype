@@ -1,0 +1,8 @@
+kind: class
+id: validation_actor
+name: Spatial validation actor
+abilities:
+  chain: {ref: chain, slot: primary}
+  field: {ref: ground_field, slot: secondary}
+  aura: {ref: moving_aura, slot: utility}
+  query: {ref: beam_query, slot: query}

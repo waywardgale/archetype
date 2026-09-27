@@ -1,0 +1,24 @@
+kind: ability
+id: chain
+name: Chain fixture
+target: {type: entity, range: 16}
+cooldown: 2s
+costs: [{resource: focus, amount: 5}]
+effects:
+  - type: chain
+    max_targets: 4
+    hop_range: 6
+    delay: 150ms
+    revisit: false
+    targets:
+      type: living_entities
+      filters: [{type: relation, is: enemy}]
+    effects:
+      - type: damage
+        target: target
+        amount: {expr: '8 / (chain.index + 1)'}
+        damage_type: minecraft:magic
+        as: hit
+      - type: heal
+        target: actor
+        amount: {expr: 'result.hit.health_lost * 0.25'}

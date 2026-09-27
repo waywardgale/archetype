@@ -41,3 +41,10 @@ tasks.register('validatePacks', JavaExec) {
     mainClass = 'dev.archetype.authoring.ValidatePacksKt'
     args providers.gradleProperty('packs').orElse('run/world/archetype/packs').get()
 }
+
+tasks.register('exportCatalog', JavaExec) {
+    dependsOn classes
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'dev.archetype.authoring.ExportCatalogKt'
+    args providers.gradleProperty('catalogOutput').orElse('build/catalog').get()
+}

@@ -25,13 +25,26 @@ import java.util.UUID
 object ArchetypeMod : ModInitializer {
     private val log = LoggerFactory.getLogger("archetype")
     private var session: Session? = null
+    private val mechanics = BuiltinEffects.catalog.effects.values.toMutableList()
+    private var frozenCatalog: MechanicCatalog? = null
+
+    /** Add-ons register during initialization, before the first server publishes definitions. */
+    // ASVS 15.4.1-15.4.3: registration and freezing share the object's monitor.
+    @Synchronized fun registerMechanic(mechanic: EffectMechanic<out Effect>) {
+        check(frozenCatalog == null) { "mechanic registration is closed after server startup" }
+        MechanicCatalog(mechanics + mechanic) // Validate IDs, configuration types and metadata before mutation.
+        mechanics += mechanic
+    }
+
+    @Synchronized private fun freezeCatalog(): MechanicCatalog = frozenCatalog ?: MechanicCatalog(mechanics.toList()).also { frozenCatalog = it }
 
     override fun onInitialize() {
         Packets.register()
         ServerLifecycleEvents.SERVER_STARTED.register { server ->
             val root = server.getWorldPath(LevelResource.ROOT).resolve("archetype")
             Files.createDirectories(root.resolve("packs"))
-            session = Session(server, root).also { it.loadInitial() }
+            val catalog = freezeCatalog()
+            session = Session(server, root, catalog).also { it.loadInitial() }
         }
         ServerLifecycleEvents.SERVER_STOPPING.register { session?.saveAll(); session = null }
         ServerTickEvents.END_SERVER_TICK.register { session?.tick() }
@@ -104,10 +117,10 @@ object ArchetypeMod : ModInitializer {
         }
     }
 
-    private class Session(val server: MinecraftServer, val root: Path) {
-        private val compiler = ManifestCompiler()
+    private class Session(val server: MinecraftServer, val root: Path, val catalog: MechanicCatalog) {
+        private val compiler = ManifestCompiler(catalog)
         private val world = MinecraftWorldOps(server)
-        val runtime = AbilityRuntime(world)
+        val runtime = AbilityRuntime(world, catalog)
         private val store = PlayerStore(root.resolve("players"))
         private val failedLoads = mutableSetOf<UUID>()
         private val knownPlayers = mutableSetOf<UUID>()
@@ -126,6 +139,7 @@ object ArchetypeMod : ModInitializer {
         fun tick() {
             ticks++
             runtime.tick(server.playerList.players.map { it.uuid })
+            runtime.drainFailures().forEach { log.warn("Ability interrupted: {}", it) }
             if (ticks % 1200L == 0L) saveAll()
             if (ticks % 10L == 0L) server.playerList.players.forEach(::sync)
             if (ticks % 4L != 0L) return
@@ -156,8 +170,9 @@ object ArchetypeMod : ModInitializer {
                 }
                 is CompileResult.Valid -> {
                     val allAbilities = result.definitions.abilities.values + result.definitions.classes.values.flatMap { it.grants.values.map { grant -> grant.ability } }
-                    val unknownTypes = allAbilities
-                        .flatMap { ability -> ability.effects.flatMap { it.descendants().toList() } }
+                    val allEffects = allAbilities.flatMap { it.effects } + result.definitions.areas.values.flatMap { it.enter + it.periodic + it.exit + it.expired }
+                    val unknownTypes = allEffects
+                        .flatMap { catalog.descendants(it).toList() }
                         .filterIsInstance<Effect.Damage>()
                         .map { it.damageType }
                         .filterNot(world::supportsDamageType)

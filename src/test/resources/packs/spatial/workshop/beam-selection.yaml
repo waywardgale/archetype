@@ -1,0 +1,16 @@
+kind: ability
+id: beam_query
+name: Beam query fixture
+effects:
+  - type: for_each
+    origin: actor
+    targets:
+      type: living_entities
+      shape: {type: beam, length: 12, radius: 0.5}
+      limit: 8
+      filters: [{type: relation, is: enemy}]
+    effects:
+      - type: damage
+        target: target
+        amount: 2
+        damage_type: minecraft:magic

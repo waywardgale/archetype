@@ -1,0 +1,7 @@
+kind: resource
+id: focus
+scope: class
+min: 0
+max: 100
+initial: 100
+regeneration: {amount: 1, every: 1s}

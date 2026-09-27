@@ -7,6 +7,8 @@ import kotlin.math.round
 
 /** Pure bounded arithmetic. Identifiers are explicit result fields; there is no property traversal. */
 object Expression {
+    private val VARIABLE = Regex("result\\.[a-z0-9_]+\\.[a-z0-9_]+|chain\\.(?:index|hit_count)|selection\\.index")
+    fun variables(source: String): Set<String> = VARIABLE.findAll(source).map { it.value }.toSet()
     fun evaluate(source: String, values: Map<String, Double>, validateOnly: Boolean = false): Double {
         require(source.length in 1..256) { "expression length must be 1..256" }
         return Parser(source, values, validateOnly).parse()
@@ -94,7 +96,7 @@ object Expression {
                     else -> throw IllegalArgumentException("unsupported function $name")
                 }
             }
-            require(Regex("result\\.[a-z0-9_./-]+\\.(health_lost|health_restored|amount)").matches(name)) {
+            require(VARIABLE.matches(name)) {
                 "unsupported variable $name"
             }
             return if (validateOnly) 1.0 else values[name] ?: throw IllegalArgumentException("result $name is unavailable")

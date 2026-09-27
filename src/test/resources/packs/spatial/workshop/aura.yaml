@@ -1,0 +1,7 @@
+kind: ability
+id: moving_aura
+name: Moving aura fixture
+effects:
+  - type: create_area
+    area: {ref: restoring_field}
+    anchor: {attached: actor}

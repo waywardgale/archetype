@@ -1,0 +1,8 @@
+kind: ability
+id: ground_field
+name: Ground field fixture
+target: {type: ground, range: 16}
+effects:
+  - type: create_area
+    area: {ref: restoring_field}
+    anchor: {position: target}

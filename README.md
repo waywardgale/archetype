@@ -10,6 +10,8 @@ The server reads packs from `<world>/archetype/packs/<pack-id>/`. Save a valid m
 
 Run `./gradlew validatePacks -Ppacks=/absolute/path/to/world/archetype/packs` to check supported manifest structure and references without starting Minecraft. Native registry checks still run on the server.
 
+Run `./gradlew exportCatalog` for the supported editor schema and effect reference in `build/catalog/`. [Spatial authoring](docs/spatial-authoring.md) documents shaped selections, chains, fixed fields, and attached areas. Validate the optional fixture pack with `./gradlew validatePacks -Ppacks=src/test/resources/packs/spatial`; it is not installed into worlds automatically.
+
 The client uses B to cycle classes and R for the first ability grant. Seven more ability keys are available in Controls and start unbound. The current HUD shows the active class, grants, cooldowns, and resource amounts.
 
 This build supports a limited set of definitions and mechanics. Packs using the remaining accepted v1 features fail validation with a located diagnostic; the compiler does not silently ignore them.

@@ -7,7 +7,7 @@ import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 
 /** Compiles only operations backed by runtime handlers. No accepted YAML is stored as an untyped map. */
-class ManifestCompiler {
+class ManifestCompiler(private val catalog: MechanicCatalog = BuiltinEffects.catalog) {
     private val loader = Load(
         LoadSettings.builder()
             .setAllowDuplicateKeys(false)
@@ -62,6 +62,7 @@ class ManifestCompiler {
         val resources = linkedMapOf<String, ResourceDef>()
         val abilities = linkedMapOf<String, AbilityDef>()
         val classes = linkedMapOf<String, ClassDef>()
+        val areas = linkedMapOf<String, AreaDef>()
         val rawClasses = mutableListOf<Pair<Doc, String>>()
         val usedIds = mutableSetOf<String>()
         for ((doc, packId) in definitions) {
@@ -73,6 +74,7 @@ class ManifestCompiler {
                 when (kind) {
                     "resource" -> resources[id] = parseResource(doc.data, id)
                     "ability" -> abilities[id] = parseAbility(doc.data, id, true, pack)
+                    "area" -> areas[id] = parseArea(doc.data, id, pack)
                     "class" -> rawClasses += doc to packId
                     else -> bad("kind", "unsupported definition kind $kind")
                 }
@@ -91,26 +93,36 @@ class ManifestCompiler {
         }
         if (classes.size > 128) errors += Diagnostic("packs", "classes", "at most 128 classes are supported")
         if (resources.size > 128) errors += Diagnostic("packs", "resources", "at most 128 resources are supported")
+        if (areas.size > 256) errors += Diagnostic("packs", "areas", "at most 256 areas are supported")
         for ((id, ability) in abilities + classes.values.flatMap { it.grants.values }.associate { it.ability.id to it.ability }) {
             val pack = packs[id.substringBefore(':')] ?: continue
             for (cost in ability.costs) {
                 if (cost.resource !in resources) errors += Diagnostic(id, "costs", "unknown resource ${cost.resource}")
                 else if (cost.resource.substringBefore(':') !in pack.dependencies + pack.id) errors += Diagnostic(id, "costs", "undeclared pack dependency")
             }
-            for (effect in ability.effects.flatMap { it.descendants().toList() }) {
-                val resource = when (effect) {
-                    is Effect.GainResource -> effect.resource
-                    is Effect.SpendResource -> effect.resource
-                    else -> null
-                }
-                if (resource != null && resource !in resources) errors += Diagnostic(id, "effects", "unknown resource $resource")
-                if (effect is Effect.Branch && effect.condition is Condition.ResourceAtLeast && effect.condition.resource !in resources) {
-                    errors += Diagnostic(id, "effects", "unknown resource ${effect.condition.resource}")
-                }
-            }
         }
+        val bodies = abilities.mapValues { it.value.effects } + classes.values.flatMap { it.grants.values }.associate { it.ability.id to it.ability.effects } +
+            areas.mapValues { (_, area) -> area.enter + area.periodic + area.exit + area.expired }
+        for ((id, effects) in bodies) for (effect in effects.flatMap { catalog.descendants(it).toList() }) {
+            val mechanic = catalog.mechanic(effect)
+            for (resource in mechanic.resources(effect)) if (resource !in resources) errors += Diagnostic(id, "effects", "unknown resource $resource")
+            for (area in mechanic.areas(effect)) if (area !in areas) errors += Diagnostic(id, "effects", "unknown area $area")
+        }
+        val visited = mutableSetOf<String>()
+        val visiting = mutableSetOf<String>()
+        fun visitArea(id: String) {
+            if (id in visited || id !in areas) return
+            if (!visiting.add(id)) {
+                errors += Diagnostic(id, "effects", "recursive area creation is not supported")
+                return
+            }
+            for (effect in bodies.getValue(id).flatMap { catalog.descendants(it).toList() }) for (ref in catalog.mechanic(effect).areas(effect)) visitArea(ref)
+            visiting -= id
+            visited += id
+        }
+        areas.keys.forEach(::visitArea)
         if (errors.isNotEmpty()) return CompileResult.Invalid(errors)
-        return CompileResult.Valid(DefinitionSet(packs, resources, abilities, classes, snapshot.fingerprint))
+        return CompileResult.Valid(DefinitionSet(packs, resources, abilities, classes, snapshot.fingerprint, areas))
     }
 
     private fun parsePack(doc: Doc): Pack {
@@ -119,7 +131,9 @@ class ManifestCompiler {
         if (m.integer("format", "$") != 1) bad("format", "supported format is 1")
         val id = m.string("id", "$")
         if (id.length > 64 || !PACK_ID.matches(id)) bad("id", "invalid pack ID")
-        val dependencies = m.listOrEmpty("dependencies", "$").mapIndexed { index, value ->
+        val rawDependencies = m.listOrEmpty("dependencies", "$")
+        if (rawDependencies.size > 128) bad("dependencies", "at most 128 dependencies are supported")
+        val dependencies = rawDependencies.mapIndexed { index, value ->
             val dependency = value.asString("dependencies[$index]")
             if (dependency.length > 64 || !PACK_ID.matches(dependency)) bad("dependencies[$index]", "invalid pack ID")
             dependency
@@ -148,8 +162,9 @@ class ManifestCompiler {
     }
 
     private fun parseAbility(m: Map<String, Any?>, id: String, global: Boolean, pack: Pack): AbilityDef {
-        val allowed = setOf("name", "description", "activation", "cooldown", "costs", "effects", "icon") + if (global) setOf("kind", "id") else emptySet()
+        val allowed = setOf("name", "description", "activation", "cooldown", "costs", "effects", "icon", "target") + if (global) setOf("kind", "id") else emptySet()
         m.only(allowed, "$" )
+        for (field in listOf("description", "icon")) if (field in m) m.string(field, "$")
         val activation = when (val mode = m["activation"]) {
             null -> Activation.ACTIVATED
             is Map<*, *> -> {
@@ -164,7 +179,9 @@ class ManifestCompiler {
             else -> bad("activation", "expected a mapping")
         }
         val cooldown = m["cooldown"]?.asString("cooldown")?.let { ticks(it, "cooldown") } ?: 0
-        val costs = m.listOrEmpty("costs", "$").mapIndexed { index, value ->
+        val rawCosts = m.listOrEmpty("costs", "$")
+        if (rawCosts.size > 128) bad("costs", "at most 128 costs are supported")
+        val costs = rawCosts.mapIndexed { index, value ->
             val field = "costs[$index]"
             val cost = value.asMap(field, field)
             cost.only(setOf("resource", "amount"), field)
@@ -183,37 +200,77 @@ class ManifestCompiler {
         }
         if (effects.isEmpty()) bad("effects", "ability must have an effect")
         validateBindings(effects, emptySet(), "effects")
-        return AbilityDef(id, m.string("name", "$"), activation, cooldown, costs, effects)
+        val targeting = m["target"]?.asMap("target", "target")?.let { target ->
+            target.only(setOf("type", "range"), "target")
+            val type = when (target.string("type", "target")) {
+                "entity" -> Targeting.Type.ENTITY
+                "ground" -> Targeting.Type.GROUND
+                else -> bad("target.type", "supported targeting modes are entity and ground")
+            }
+            Targeting(type, boundedNumber(target, "range", "target", 0.01, 32.0, 32.0))
+        } ?: Targeting()
+        if (targeting.type != Targeting.Type.GROUND && effects.any { requiresGround(it) }) bad("target", "ground positions require target.type: ground")
+        validateContexts(effects, targeting.type == Targeting.Type.ENTITY, targeting.type == Targeting.Type.GROUND, "effects")
+        return AbilityDef(id, m.string("name", "$"), activation, cooldown, costs, effects, targeting)
+    }
+
+    private fun requiresGround(effect: Effect): Boolean = catalog.mechanic(effect).let { mechanic ->
+        mechanic.needsGround(effect) || mechanic.nested(effect).any { body -> body.any { requiresGround(it) } }
+    }
+
+    private fun parseArea(m: Map<String, Any?>, id: String, pack: Pack): AreaDef {
+        m.only(setOf("kind", "id", "shape", "duration", "sample_every", "targets", "enter", "periodic", "exit", "expired"), "$")
+        val shape = parseShape(m["shape"].asMap("shape", "shape"), "shape")
+        val duration = ticks(m.string("duration", "$"), "duration")
+        val sample = m["sample_every"]?.asString("sample_every")?.let { ticks(it, "sample_every") } ?: 2
+        if (duration <= 0) bad("duration", "area lifetime must be positive")
+        if (sample <= 0) bad("sample_every", "sampling interval must be positive")
+        val selector = parseSelector(m["targets"].asMap("targets", "targets"), "targets", shape)
+        val enter = nestedEffects(m, "enter", "$", pack, 0, false)
+        val exit = nestedEffects(m, "exit", "$", pack, 0, false)
+        val expired = nestedEffects(m, "expired", "$", pack, 0, false)
+        var interval = 0
+        val periodic = m["periodic"]?.asMap("periodic", "periodic")?.let { pulse ->
+            pulse.only(setOf("every", "effects"), "periodic")
+            interval = ticks(pulse.string("every", "periodic"), "periodic.every")
+            if (interval <= 0) bad("periodic.every", "periodic interval must be positive")
+            nestedEffects(pulse, "effects", "periodic", pack, 0)
+        }.orEmpty()
+        for ((field, body) in listOf("enter" to enter, "exit" to exit, "expired" to expired, "periodic.effects" to periodic)) {
+            validateBindings(body, emptySet(), field)
+            validateContexts(body, field != "expired", true, field)
+        }
+        return AreaDef(id, shape, duration, sample, selector, enter, periodic, interval, exit, expired)
+    }
+
+    private fun validateContexts(effects: List<Effect>, entity: Boolean, position: Boolean, field: String) {
+        for ((index, effect) in effects.withIndex()) {
+            val mechanic = catalog.mechanic(effect)
+            val location = "$field[$index]"
+            if (mechanic.needsEntityTarget(effect) && !entity) bad(location, "entity target is not available in this context")
+            if (mechanic.needsTarget(effect) && !entity && !position) bad(location, "target is not available in this context")
+            if (mechanic.needsGround(effect) && !position) bad(location, "ground position is not available in this context")
+            for (body in mechanic.nested(effect)) validateContexts(body, entity || mechanic.providesTarget, position, "$location.effects")
+        }
     }
 
     private fun validateBindings(effects: List<Effect>, incoming: Set<String>, field: String): Set<String> {
         val available = incoming.toMutableSet()
         for ((index, effect) in effects.withIndex()) {
             val location = "$field[$index]"
+            val mechanic = catalog.mechanic(effect)
+            for ((input, numeric) in mechanic.inputs(effect)) checkNumeric(numeric, available, "$location.$input")
             when (effect) {
-                is Effect.Heal -> checkNumeric(effect.amount, available, "$location.amount")
-                is Effect.Damage -> checkNumeric(effect.amount, available, "$location.amount")
-                is Effect.GainResource -> checkNumeric(effect.amount, available, "$location.amount")
-                is Effect.SpendResource -> checkNumeric(effect.amount, available, "$location.amount")
-                is Effect.Delay -> validateBindings(effect.effects, available, "$location.effects")
-                is Effect.Repeat -> validateBindings(effect.effects, available, "$location.effects")
                 is Effect.Branch -> {
-                    when (val condition = effect.condition) {
-                        is Condition.ResourceAtLeast -> checkNumeric(condition.amount, available, "$location.when.amount")
-                        is Condition.Compare -> {
-                            checkNumeric(condition.left, available, "$location.when.left")
-                            checkNumeric(condition.right, available, "$location.when.right")
-                        }
-                    }
                     val whenTrue = validateBindings(effect.onTrue, available, "$location.then")
                     val whenFalse = validateBindings(effect.onFalse, available, "$location.else")
                     available += whenTrue.intersect(whenFalse)
                 }
+                else -> for (body in mechanic.nested(effect)) validateBindings(body, available + mechanic.localBindings, "$location.effects")
             }
             effect.resultName?.let { name ->
-                val fieldName = when (effect) { is Effect.Heal -> "health_restored"; is Effect.Damage -> "health_lost"; else -> "amount" }
-                val key = "result.$name.$fieldName"
-                if (!available.add(key)) bad("$location.as", "duplicate result name")
+                if (available.any { it.startsWith("result.$name.") }) bad("$location.as", "duplicate result name")
+                available += mechanic.resultFields.map { "result.$name.$it" }
             }
         }
         return available
@@ -221,57 +278,148 @@ class ManifestCompiler {
 
     private fun checkNumeric(numeric: Numeric, available: Set<String>, field: String) {
         if (numeric !is Numeric.Expression) return
-        val reads = Regex("result\\.[a-z0-9_./-]+\\.(?:health_lost|health_restored|amount)")
-            .findAll(numeric.source).map { it.value }.toList()
-        for (read in reads) if (read !in available) bad(field, "$read is not available here")
+        for (read in Expression.variables(numeric.source)) if (read !in available) bad(field, "$read is not available here")
     }
 
     private fun parseEffect(m: Map<String, Any?>, field: String, pack: Pack, depth: Int): Effect {
         if (depth > 8) bad(field, "effect nesting exceeds 8 levels")
         val type = m.string("type", field)
-        val resultName = m["as"]?.asString("$field.as")
-        if (resultName != null && !LOCAL_ID.matches(resultName)) bad("$field.as", "invalid result name")
-        return when (type) {
-            "heal", "damage" -> {
-                val allowed = setOf("type", "target", "amount", "as", "id") + if (type == "damage") setOf("damage_type") else emptySet()
-                m.only(allowed, field)
-                val target = when (m.string("target", field)) {
-                    "actor" -> EffectTarget.ACTOR
-                    "target" -> EffectTarget.TARGET
-                    else -> bad("$field.target", "supported targets are actor and target")
-                }
-                val amount = numeric(m["amount"], "$field.amount")
-                if (type == "heal") Effect.Heal(target, amount, resultName)
-                else Effect.Damage(target, amount, m.string("damage_type", field), resultName)
+        val mechanic = catalog.effects[if (':' in type) type else "archetype:$type"] ?: bad("$field.type", "unsupported effect type $type")
+        // ASVS 2.2.1-2.2.3: registration metadata defines the accepted fields before typed decoding.
+        m.only(mechanic.fields.keys + setOf("type", "id") + if (mechanic.resultFields.isNotEmpty()) setOf("as") else emptySet(), field)
+        for (required in mechanic.required) if (required !in m) bad("$field.$required", "required field is missing")
+        val name = m["as"]?.asString("$field.as")
+        if (name != null && !Regex("[a-z0-9_]{1,64}").matches(name)) bad("$field.as", "result name must use lowercase letters, digits or underscores")
+        return mechanic.decode(object : EffectReader {
+            override val resultName = name
+            override fun text(key: String) = m.string(key, field)
+            override fun integer(key: String, min: Int, max: Int, default: Int?): Int {
+                val value = if (key !in m && default != null) default else m.integer(key, field)
+                if (value !in min..max) bad("$field.$key", "must be $min..$max")
+                return value
             }
-            "gain_resource", "spend_resource" -> {
-                m.only(setOf("type", "resource", "amount", "as", "id"), field)
-                val resource = qualify(m.string("resource", field), pack.id, pack, "$field.resource")
-                val amount = numeric(m["amount"], "$field.amount")
-                if (type == "gain_resource") Effect.GainResource(resource, amount, resultName)
-                else Effect.SpendResource(resource, amount, resultName)
+            override fun number(key: String, min: Double, max: Double, default: Double?) = boundedNumber(m, key, field, min, max, default)
+            override fun boolean(key: String, default: Boolean) = booleanValue(m, key, field, default)
+            override fun numeric(key: String) = this@ManifestCompiler.numeric(m[key], "$field.$key")
+            override fun duration(key: String, positive: Boolean, default: Int?): Int {
+                val value = if (key !in m && default != null) default else ticks(text(key), "$field.$key")
+                if (positive && value <= 0) bad("$field.$key", "interval must be positive")
+                return value
             }
-            "delay" -> {
-                m.only(setOf("type", "duration", "effects", "id"), field)
-                val delay = ticks(m.string("duration", field), "$field.duration")
-                if (delay == 0) bad("$field.duration", "delay must be positive")
-                Effect.Delay(delay, nestedEffects(m, "effects", field, pack, depth))
+            override fun reference(key: String): String {
+                val value = m[key]
+                val ref = if (value is Map<*, *>) {
+                    val reference = value.asMap("$field.$key", "$field.$key")
+                    reference.only(setOf("ref"), "$field.$key")
+                    reference.string("ref", "$field.$key")
+                } else text(key)
+                return qualify(ref, pack.id, pack, "$field.$key")
             }
-            "repeat" -> {
-                m.only(setOf("type", "count", "every", "effects", "id"), field)
-                val count = m.integer("count", field)
-                if (count !in 1..64) bad("$field.count", "repeat count must be 1..64")
-                val every = ticks(m.string("every", field), "$field.every")
-                if (every == 0) bad("$field.every", "repeat interval must be positive")
-                Effect.Repeat(count, every, nestedEffects(m, "effects", field, pack, depth))
+            override fun target(key: String) = parseTarget(text(key), "$field.$key")
+            override fun spatialTarget(key: String, default: SpatialTarget) = if (key !in m) default else parseSpatial(text(key), "$field.$key")
+            override fun effects(key: String, required: Boolean) = nestedEffects(m, key, field, pack, depth, required)
+            override fun condition(key: String) = parseCondition(m[key].asMap("$field.$key", "$field.$key"), "$field.$key", pack)
+            override fun selector(key: String, shape: Shape?) = parseSelector(m[key].asMap("$field.$key", "$field.$key"), "$field.$key", shape)
+            override fun anchor(key: String): Anchor {
+                val anchor = m[key].asMap("$field.$key", "$field.$key")
+                anchor.only(setOf("position", "attached"), "$field.$key")
+                if (("position" in anchor) == ("attached" in anchor)) bad("$field.$key", "anchor needs exactly one of position or attached")
+                return if ("position" in anchor) Anchor.Fixed(parseSpatial(anchor.string("position", "$field.$key"), "$field.$key.position"))
+                else Anchor.Attached(parseTarget(anchor.string("attached", "$field.$key"), "$field.$key.attached"))
             }
-            "branch" -> {
-                m.only(setOf("type", "when", "then", "else", "id"), field)
-                val condition = parseCondition(m["when"].asMap("$field.when", "$field.when"), "$field.when", pack)
-                Effect.Branch(condition, nestedEffects(m, "then", field, pack, depth), nestedEffects(m, "else", field, pack, depth, required = false))
+        })
+    }
+
+    private fun parseTarget(text: String, field: String): EffectTarget = when (text) {
+        "actor" -> EffectTarget.ACTOR
+        "target" -> EffectTarget.TARGET
+        else -> bad(field, "supported entity targets are actor and target")
+    }
+
+    private fun parseSpatial(text: String, field: String): SpatialTarget = when (text) {
+        "actor" -> SpatialTarget.ACTOR
+        "target" -> SpatialTarget.TARGET
+        "ground" -> SpatialTarget.GROUND
+        else -> bad(field, "supported positions are actor, target and ground")
+    }
+
+    private fun boundedNumber(m: Map<String, Any?>, key: String, field: String, min: Double, max: Double, default: Double? = null): Double {
+        val value = if (key !in m && default != null) default else m.number(key, field)
+        if (value !in min..max) bad("$field.$key", "must be between $min and $max")
+        return value
+    }
+
+    private fun booleanValue(m: Map<String, Any?>, key: String, field: String, default: Boolean): Boolean {
+        if (key !in m) return default
+        return m[key] as? Boolean ?: bad("$field.$key", "expected a Boolean")
+    }
+
+    private fun parseShape(m: Map<String, Any?>, field: String): Shape {
+        fun size(key: String, default: Double? = null) = boundedNumber(m, key, field, 0.01, 32.0, default)
+        val shape = when (m.string("type", field)) {
+            "point" -> { m.only(setOf("type", "radius"), field); Shape.Point(size("radius", 0.25)) }
+            "sphere" -> { m.only(setOf("type", "radius"), field); Shape.Sphere(size("radius")) }
+            "cylinder" -> { m.only(setOf("type", "radius", "height"), field); Shape.Cylinder(size("radius"), size("height")) }
+            "ring" -> {
+                m.only(setOf("type", "inner_radius", "outer_radius", "height"), field)
+                val inner = boundedNumber(m, "inner_radius", field, 0.0, 32.0)
+                val outer = size("outer_radius")
+                if (inner >= outer) bad("$field.inner_radius", "inner radius must be smaller than outer radius")
+                Shape.Ring(inner, outer, size("height"))
             }
-            else -> bad("$field.type", "unsupported effect type $type")
+            "box" -> { m.only(setOf("type", "width", "height", "depth"), field); Shape.Box(size("width"), size("height"), size("depth")) }
+            "segment", "beam" -> { m.only(setOf("type", "length", "radius"), field); Shape.Segment(size("length"), size("radius")) }
+            "cone" -> { m.only(setOf("type", "range", "angle"), field); Shape.Cone(size("range"), boundedNumber(m, "angle", field, 0.01, 180.0)) }
+            else -> bad("$field.type", "unsupported shape")
         }
+        if (shape.bound > 32.0) bad(field, "shape must fit within a 32-block enclosing radius")
+        return shape
+    }
+
+    private fun parseSelector(m: Map<String, Any?>, field: String, suppliedShape: Shape? = null): Selector {
+        m.only(setOf("type", "limit", "filters", "include_actor", "order", "line_of_sight") + if (suppliedShape == null) setOf("shape") else emptySet(), field)
+        if (m.string("type", field) != "living_entities") bad("$field.type", "supported selector type is living_entities")
+        val shape = suppliedShape ?: parseShape(m["shape"].asMap("$field.shape", "$field.shape"), "$field.shape")
+        val limit = if ("limit" in m) m.integer("limit", field) else 16
+        if (limit !in 1..64) bad("$field.limit", "limit must be 1..64")
+        var relation = Relation.ANY
+        var minimumHealth = 0.0
+        var maximumHealth = 1.0
+        val seen = mutableSetOf<String>()
+        val filters = m.listOrEmpty("filters", field)
+        if (filters.size > 8) bad("$field.filters", "at most 8 filters are supported")
+        for ((index, value) in filters.withIndex()) {
+            val path = "$field.filters[$index]"
+            val filter = value.asMap(path, path)
+            val type = filter.string("type", path)
+            if (!seen.add(type)) bad("$path.type", "duplicate filter type")
+            when (type) {
+                "relation" -> {
+                    filter.only(setOf("type", "is"), path)
+                    relation = when (filter.string("is", path)) {
+                        "any" -> Relation.ANY
+                        "ally" -> Relation.ALLY
+                        "enemy" -> Relation.ENEMY
+                        "self" -> Relation.SELF
+                        else -> bad("$path.is", "unsupported relationship")
+                    }
+                }
+                "health_fraction" -> {
+                    filter.only(setOf("type", "min", "max"), path)
+                    minimumHealth = boundedNumber(filter, "min", path, 0.0, 1.0, 0.0)
+                    maximumHealth = boundedNumber(filter, "max", path, 0.0, 1.0, 1.0)
+                    if (minimumHealth > maximumHealth) bad(path, "health minimum exceeds maximum")
+                }
+                else -> bad("$path.type", "unsupported selector filter")
+            }
+        }
+        val order = when (m["order"] ?: "nearest") {
+            "nearest" -> TargetOrder.NEAREST
+            "lowest_health" -> TargetOrder.LOWEST_HEALTH
+            "highest_health" -> TargetOrder.HIGHEST_HEALTH
+            else -> bad("$field.order", "unsupported target order")
+        }
+        return Selector(shape, limit, relation, booleanValue(m, "line_of_sight", field, true), booleanValue(m, "include_actor", field, false), order, minimumHealth, maximumHealth)
     }
 
     private fun nestedEffects(
@@ -386,7 +534,8 @@ private fun Map<String, Any?>.number(key: String, field: String): Double {
     return number
 }
 private fun Map<String, Any?>.listOrEmpty(key: String, field: String): List<Any?> {
-    val value = this[key] ?: return emptyList()
+    if (key !in this) return emptyList()
+    val value = this[key]
     return value as? List<*> ?: bad(if (field == "$") key else "$field.$key", "expected a list")
 }
 private fun Map<String, Any?>.only(fields: Set<String>, field: String) {
