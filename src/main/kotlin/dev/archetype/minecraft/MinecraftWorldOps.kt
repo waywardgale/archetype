@@ -14,6 +14,8 @@ import net.minecraft.server.level.ServerLevel
 import net.minecraft.world.damagesource.DamageSource
 import net.minecraft.world.damagesource.DamageType
 import net.minecraft.world.entity.LivingEntity
+import net.minecraft.world.entity.ai.attributes.AttributeModifier
+import net.minecraft.world.entity.ai.attributes.Attributes
 import net.minecraft.world.entity.projectile.ProjectileUtil
 import net.minecraft.world.level.ClipContext
 import net.minecraft.world.level.entity.EntityTypeTest
@@ -23,6 +25,14 @@ import net.minecraft.world.phys.Vec3
 import java.util.UUID
 
 class MinecraftWorldOps(private val server: MinecraftServer) : WorldOps {
+    private val speedBonusId = Identifier.parse("archetype:status_movement_speed")
+    override fun movementSpeedBonus(target: UUID, amount: Double) {
+        require(amount.isFinite() && amount in 0.0..1.0) { "invalid movement speed bonus" }
+        val attribute = entity(target)?.getAttribute(Attributes.MOVEMENT_SPEED) ?: return
+        // Source composition happens in the runtime; preserve base values and other mods' modifiers.
+        if (amount == 0.0) attribute.removeModifier(speedBonusId)
+        else attribute.addOrUpdateTransientModifier(AttributeModifier(speedBonusId, amount, AttributeModifier.Operation.ADD_VALUE))
+    }
     private fun entity(id: UUID): LivingEntity? = server.allLevels.asSequence()
         .mapNotNull { it.getEntityInAnyDimension(id) as? LivingEntity }
         .firstOrNull()

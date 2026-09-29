@@ -18,6 +18,8 @@ interface WorldOps {
     fun candidates(actor: UUID, origin: Position, radius: Double, limit: Int): List<EntityView> = emptyList()
     fun view(actor: UUID, target: UUID): EntityView? = null
     fun lineOfSight(origin: Position, target: UUID): Boolean = false
+    /** Replaces only Archetype's transient additive movement speed bonus; zero removes it. */
+    fun movementSpeedBonus(target: UUID, amount: Double) {}
 }
 
 data class PlayerRecord(
@@ -34,6 +36,8 @@ sealed interface CastResult {
     data class Interrupted(val reason: String) : CastResult
 }
 
+data class StatusView(val status: String, val owner: UUID, val sourceClass: String, val grant: String, val application: String, val stacks: Int, val remainingTicks: Int?, val membership: Boolean)
+
 /** All mutation runs on the server tick thread. ASVS 2.3.1, 2.3.4, 15.4.1. */
 class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicCatalog = BuiltinEffects.catalog) {
     var definitions = DefinitionSet(emptyMap(), emptyMap(), emptyMap(), emptyMap(), "")
@@ -42,6 +46,7 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
         private set
     private val players = linkedMapOf<UUID, PlayerRecord>()
     private val selection = TargetSelection(world)
+    private var estimates = ExecutionEstimates(definitions, catalog)
     private data class Budget(var remaining: Int = 1024)
     private class Lifetime(val parent: Lifetime? = null) {
         var cancelled = false
@@ -52,6 +57,8 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
         val target: UUID?, val ground: Position?, val budget: Budget, val lifetime: Lifetime,
         val selected: Boolean = false, val dependencies: MutableMap<String, AreaDef> = linkedMapOf(),
         val targetGuard: TargetGuard? = null,
+        val statusDependencies: MutableMap<String, StatusDef> = linkedMapOf(),
+        val originDefinition: String = ability.id, val sourceDimension: String? = null,
     )
     private data class TargetGuard(val frame: Frame, val selector: Selector)
     private data class Scheduled(val scope: Scope, val due: Long, val effects: List<Effect>, val bindings: Map<String, Double>, val repeatsLeft: Int = 1, val every: Int = 0)
@@ -61,10 +68,20 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
         val expires: Long, var nextSample: Long, var nextPulse: Long,
         val members: MutableMap<UUID, Lifetime> = linkedMapOf(),
     )
+    private data class StatusKey(val owner: UUID, val classId: String, val grant: String, val application: String, val target: UUID, val membership: Lifetime?)
+    private data class Contribution(
+        val key: StatusKey, val scope: Scope, val definition: StatusDef, val lifetime: Lifetime,
+        val stackExpiries: MutableList<Long>, var nextPulse: Long,
+    )
+    private data class ControllerDependencies(
+        val areas: MutableMap<String, AreaDef>, val statuses: MutableMap<String, StatusDef>, val createdStatuses: Set<String>,
+    )
     private val scopes = linkedMapOf<UUID, Scope>()
     private val pending = mutableListOf<Scheduled>()
     private val chains = mutableListOf<ChainTask>()
     private val areas = mutableListOf<Area>()
+    private val statuses = linkedMapOf<StatusKey, Contribution>()
+    private val statusesByTarget = mutableMapOf<UUID, MutableList<Contribution>>()
     private val failures = ArrayDeque<String>()
     private val onlineClock = mutableMapOf<UUID, Long>()
     private val castsThisTick = mutableMapOf<UUID, Int>()
@@ -74,6 +91,11 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
 
     fun record(player: UUID): PlayerRecord = players.getOrPut(player) { PlayerRecord() }
     fun drainFailures(): List<String> = failures.toList().also { failures.clear() }
+    fun statuses(target: UUID): List<StatusView> = statusesByTarget[target].orEmpty().filter { it.lifetime.active }.map {
+        StatusView(it.definition.id, it.key.owner, it.key.classId, it.key.grant, it.key.application, it.stackExpiries.size,
+            if (it.key.membership != null) null else (it.stackExpiries.max() - now(it.key.owner)).coerceAtLeast(0).toInt(), it.key.membership != null)
+    }
+    fun shutdown() { cancelWhere { true } }
 
     fun installRecord(player: UUID, record: PlayerRecord) {
         for ((key, amount) in record.resources.toMap()) definitions.resources[key.substringAfterLast('|')]?.let {
@@ -83,23 +105,26 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
     }
 
     fun onDeath(player: UUID) {
+        cancelTargetStatuses(player)
         cancelWhere { it.owner == player }
         val record = players[player] ?: return
         for ((key, _) in record.resources.toMap()) definitions.resources[key.substringAfterLast('|')]?.let { record.resources[key] = it.initial }
     }
 
-    fun onLogout(player: UUID) { cancelWhere { it.owner == player } }
+    fun onLogout(player: UUID) { cancelTargetStatuses(player); cancelWhere { it.owner == player } }
 
     fun publish(candidate: DefinitionSet) {
         if (candidate.fingerprint == definitions.fingerprint) return
         cancelWhere { scope ->
             candidate.classes[scope.classId]?.grants?.get(scope.grant)?.ability != scope.ability ||
-                scope.dependencies.any { (id, definition) -> candidate.areas[id] != definition }
+                scope.dependencies.any { (id, definition) -> candidate.areas[id] != definition } ||
+                scope.statusDependencies.any { (id, definition) -> candidate.statuses[id] != definition }
         }
         for (record in players.values) for ((key, amount) in record.resources.toMap()) candidate.resources[key.substringAfterLast('|')]?.let {
             record.resources[key] = amount.coerceIn(it.minimum, it.maximum)
         }
         definitions = candidate
+        estimates = ExecutionEstimates(candidate, catalog)
         generation++
     }
 
@@ -134,8 +159,14 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
         if ((record.cooldowns[cooldownKey] ?: 0) > 0) return CastResult.Rejected("cooldown is active")
         // Known oversized setup is rejected before payment. Dynamic query work is checked during execution.
         if (estimate(ability.effects) > 1024) return CastResult.Rejected("ability work limit exceeded")
-        val dependencies = areaDependencies(ability.effects)
-        if (dependencies.values.any { area -> (estimate(area.enter) + estimate(area.exit) + estimate(area.periodic)) * area.selector.limit + 1 > 1024 || estimate(area.expired) > 1024 }) return CastResult.Rejected("area pulse work limit exceeded")
+        val (dependencies, statusDependencies, createdStatuses) = controllerDependencies(ability.effects)
+        if (dependencies.values.any { area -> (estimate(area.enter) + estimate(area.exit) + estimate(area.periodic) + buffWork(area)) * area.selector.limit + 1 > 1024 || estimate(area.expired) > 1024 }) return CastResult.Rejected("area pulse work limit exceeded")
+        if (createdStatuses.any { estimate(statusDependencies.getValue(it).bodies) > 1024 }) return CastResult.Rejected("status pulse work limit exceeded")
+        val knownKeys = initialStatusKeys(player, classId, grantName, ability, selectedTarget)
+        val refreshedSlots = knownKeys.count { statuses[it]?.lifetime?.active == true }
+        val contributions = (estimatedStatuses(ability.effects) - refreshedSlots).coerceAtLeast(0)
+        if (contributions + statuses.size > 4096 || contributions + statuses.values.count { it.key.owner == player } > 256) return CastResult.Rejected("status contribution limit reached")
+        if (knownKeys.filter { statuses[it]?.lifetime?.active != true }.groupingBy { it.target }.eachCount().any { (id, count) -> count + statusesByTarget[id].orEmpty().count { it.lifetime.active } > 64 }) return CastResult.Rejected("status contribution limit reached")
         val created = estimatedAreas(ability.effects)
         if (created + areas.size > 512 || created + areas.count { it.scope.owner == player } > 32) return CastResult.Rejected("area limit reached")
         val slots = initialSlots(ability.effects)
@@ -152,7 +183,8 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
         }
         for ((key, amount) in amounts) record.resources[key] = record.resources.getValue(key) - amount
         if (ability.cooldownTicks > 0) record.cooldowns[cooldownKey] = ability.cooldownTicks
-        val scope = Scope(UUID.randomUUID(), player, classId, grantName, ability, if (ability.targeting.type == Targeting.Type.GROUND) null else selectedTarget, ground, Budget(), Lifetime(), dependencies = dependencies)
+        val scope = Scope(UUID.randomUUID(), player, classId, grantName, ability, if (ability.targeting.type == Targeting.Type.GROUND) null else selectedTarget, ground, Budget(), Lifetime(), dependencies = dependencies,
+            statusDependencies = statusDependencies, sourceDimension = world.position(player)?.dimension)
         scopes[scope.id] = scope
         try { execute(scope, ability.effects, linkedMapOf()) }
         catch (failure: Exception) {
@@ -168,7 +200,7 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
         globalCastsThisTick = 0
         workThisTick = 4096
         val online = onlinePlayers.toSet()
-        cancelWhere { it.owner !in online }
+        cancelWhere { it.owner !in online || !world.availableTarget(it.owner, it.owner) || (it.sourceDimension != null && world.position(it.owner)?.dimension != it.sourceDimension) }
         for (player in online) {
             onlineClock[player] = now(player) + 1
             val record = players[player] ?: continue
@@ -187,8 +219,10 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
                 }
             }
         }
-        // Membership reconciliation and expiry precede descendants due on the same tick.
+        // Timed contribution expiry precedes owned controllers; membership reconciliation precedes status pulses.
+        for (status in statuses.values.toList()) if (status.lifetime.active) try { tickStatus(status, pulse = false) } catch (failure: Exception) { fail(status.scope, failure) }
         for (area in areas.toList()) if (area.lifetime.active) try { tickArea(area) } catch (failure: Exception) { fail(area.scope, failure) }
+        for (status in statuses.values.toList()) if (status.lifetime.active) try { tickStatus(status, pulse = true) } catch (failure: Exception) { fail(status.scope, failure) }
         val due = pending.filter { it.due <= now(it.scope.owner) }.take(256)
         pending.removeAll(due.toSet())
         for (task in due) if (task.scope.lifetime.active) try {
@@ -244,7 +278,23 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
         }
         override fun resource(id: String, amount: Numeric, spend: Boolean) = changeResource(record(scope.owner), scope.classId, id, amount.amount(results) * if (spend) -1 else 1)
         override fun delay(ticks: Int, effects: List<Effect>, count: Int, every: Int) = schedule(scope, ticks, effects, results, count, every)
-        override fun branch(condition: Condition, onTrue: List<Effect>, onFalse: List<Effect>) = execute(scope, if (condition(scope, condition, results)) onTrue else onFalse, results)
+        override fun branch(condition: Condition, onTrue: List<Effect>, onFalse: List<Effect>) {
+            val matches = condition(condition) ?: return
+            execute(scope, if (matches) onTrue else onFalse, results)
+        }
+
+        private fun condition(condition: Condition): Boolean? = when (condition) {
+            is Condition.HasStatus -> target(condition.target)?.let { matchingStatuses(scope, it, condition.filter).isNotEmpty() }
+            is Condition.ResourceAtLeast -> {
+                val resource = definitions.resources[condition.resource] ?: error("resource is unavailable")
+                balance(record(scope.owner), scope.classId, resource) >= condition.amount.value(results)
+            }
+            is Condition.Compare -> {
+                val left = condition.left.value(results)
+                val right = condition.right.value(results)
+                when (condition.operator) { "lt" -> left < right; "lte" -> left <= right; "eq" -> left == right; "gte" -> left >= right; "gt" -> left > right; else -> error("invalid comparison") }
+            }
+        }
         override fun forEach(effect: Effect.ForEach) {
             val origin = spatial(scope, effect.origin) ?: return
             val frame = Frame(origin, world.direction(scope.owner))
@@ -261,6 +311,33 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
             hitChain(scope.copy(targetGuard = TargetGuard(Frame(actorPosition), initial)), effect, first, position, emptySet(), 0, results.toMap())
         }
         override fun area(effect: Effect.CreateArea) = createArea(scope, effect)
+        override fun status(effect: Effect.ApplyStatus) {
+            val id = target(effect.target) ?: return
+            applyStatus(scope, effect.status, id, "${scope.originDefinition}/${effect.applicationId}")
+        }
+        override fun dispel(effect: Effect.Dispel): Map<String, Double>? {
+            val id = target(effect.target) ?: return null
+            val removed = matchingStatuses(scope, id, effect.filter).take(effect.count)
+            val stacks = removed.sumOf { it.stackExpiries.size }
+            // ASVS 2.3.1, 2.3.4: select and cancel once on the server thread, after charging all query work.
+            removed.forEach { it.lifetime.cancelled = true }
+            prune()
+            return mapOf("contributions_removed" to removed.size.toDouble(), "stacks_removed" to stacks.toDouble())
+        }
+    }
+
+    private fun matchingStatuses(scope: Scope, target: UUID, filter: StatusFilter): List<Contribution> {
+        val candidates = statusesByTarget[target].orEmpty()
+        // ASVS 2.3.2: the recipient index bounds each query to its 64 contribution slots.
+        charge(scope, candidates.size)
+        return candidates.filter { status ->
+            status.lifetime.active && (filter.status == null || status.definition.id == filter.status) &&
+                status.definition.tags.containsAll(filter.tags) && when (filter.source) {
+                    StatusSource.ANY -> true
+                    StatusSource.ACTOR -> status.key.owner == scope.owner
+                    StatusSource.GRANT -> status.key.owner == scope.owner && status.key.classId == scope.classId && status.key.grant == scope.grant
+                }
+        }
     }
 
     private fun hitChain(scope: Scope, effect: Effect.Chain, target: UUID, position: Position, visited: Set<UUID>, previousHits: Int, bindings: Map<String, Double>) {
@@ -309,11 +386,12 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
     }
 
     private fun tickArea(area: Area) {
-        val frame = frame(area) ?: run { area.lifetime.cancelled = true; return }
+        val frame = frame(area) ?: run { area.lifetime.cancelled = true; prune(); return }
         val time = now(area.scope.owner)
         if (time >= area.expires) {
             area.lifetime.cancelled = true
-            execute(area.scope.copy(target = null, ground = frame.position, targetGuard = null, budget = Budget()), area.definition.expired, linkedMapOf())
+            prune()
+            execute(area.scope.copy(target = null, ground = frame.position, targetGuard = null, budget = Budget(), originDefinition = area.definition.id), area.definition.expired, linkedMapOf())
             return
         }
         val budget = Budget()
@@ -324,33 +402,115 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
         }
         if (area.definition.periodicTicks > 0 && time >= area.nextPulse) {
             area.nextPulse = time + area.definition.periodicTicks
-            for ((target, lifetime) in area.members.toMap()) execute(area.scope.copy(target = target, ground = frame.position, selected = true, budget = budget, lifetime = lifetime, targetGuard = TargetGuard(frame, area.definition.selector)), area.definition.periodic, linkedMapOf())
+            for ((target, lifetime) in area.members.toMap()) execute(area.scope.copy(target = target, ground = frame.position, selected = true, budget = budget, lifetime = lifetime, originDefinition = area.definition.id, targetGuard = TargetGuard(frame, area.definition.selector)), area.definition.periodic, linkedMapOf())
         }
     }
 
     private fun reconcileArea(area: Area, frame: Frame, budget: Budget) {
-        val pulseScope = area.scope.copy(ground = frame.position, budget = budget, lifetime = area.lifetime, selected = true, targetGuard = null)
+        val pulseScope = area.scope.copy(ground = frame.position, budget = budget, lifetime = area.lifetime, selected = true, targetGuard = null, originDefinition = area.definition.id)
         val targets = selection.select(area.scope.owner, frame, area.definition.selector, charge = { charge(pulseScope, it) }).toSet()
         for (old in area.members.keys.toList()) if (old !in targets) {
             area.members.remove(old)?.cancelled = true
+            prune()
             execute(pulseScope.copy(target = old), area.definition.exit, linkedMapOf())
         }
         for (target in targets) if (target !in area.members && area.lifetime.active) {
             val lifetime = Lifetime(area.lifetime)
             area.members[target] = lifetime
+            for (status in area.definition.buffs) {
+                charge(pulseScope, 1)
+                applyStatus(pulseScope.copy(target = target, lifetime = lifetime), status, target, "${area.definition.id}/buffs/$status", lifetime)
+            }
             execute(pulseScope.copy(target = target, lifetime = lifetime, targetGuard = TargetGuard(frame, area.definition.selector)), area.definition.enter, linkedMapOf())
         }
     }
 
-    private fun condition(scope: Scope, condition: Condition, results: Map<String, Double>): Boolean = when (condition) {
-        is Condition.ResourceAtLeast -> {
-            val resource = definitions.resources[condition.resource] ?: error("resource is unavailable")
-            balance(record(scope.owner), scope.classId, resource) >= condition.amount.value(results)
+    private fun applyStatus(scope: Scope, id: String, target: UUID, application: String, membership: Lifetime? = null) {
+        if (!scope.lifetime.active) return
+        val definition = definitions.statuses[id] ?: error("status is unavailable")
+        val key = StatusKey(scope.owner, scope.classId, scope.grant, application, target, membership)
+        val time = now(scope.owner)
+        val existing = statuses[key]?.takeIf { it.lifetime.active }
+        if (existing != null) {
+            val before = existing.stackExpiries.size
+            val maximum = definition.stacks?.maximum ?: 1
+            val expiry = time + definition.durationTicks
+            if (definition.stacks?.duration != StackDuration.PER_STACK) {
+                if (before < maximum) existing.stackExpiries += expiry
+                existing.stackExpiries.replaceAll { expiry }
+            } else if (before < maximum) existing.stackExpiries += expiry
+            else {
+                val oldest = existing.stackExpiries.indices.minBy { existing.stackExpiries[it] }
+                existing.stackExpiries[oldest] = expiry
+            }
+            val callbackScope = statusScope(existing, scope.budget)
+            execute(callbackScope, definition.refreshed, statusBindings(existing))
+            if (before != existing.stackExpiries.size) execute(callbackScope, definition.stacksChanged, statusBindings(existing))
+            return
         }
-        is Condition.Compare -> {
-            val left = condition.left.value(results)
-            val right = condition.right.value(results)
-            when (condition.operator) { "lt" -> left < right; "lte" -> left <= right; "eq" -> left == right; "gte" -> left >= right; "gt" -> left > right; else -> error("invalid comparison") }
+        // ASVS 2.3.2, 2.3.4: allocation and insertion occur together on the server tick thread.
+        require(statuses.size < 4096 && statuses.values.count { it.key.owner == scope.owner } < 256 && statusesByTarget[target].orEmpty().size < 64) { "status contribution limit reached" }
+        val root = scopes[scope.id] ?: return
+        val lifetime = Lifetime(membership ?: root.lifetime)
+        val contribution = Contribution(key, scope, definition, lifetime, mutableListOf(time + definition.durationTicks), time + definition.periodicTicks)
+        root.statusDependencies[id] = definition
+        statuses[key] = contribution
+        statusesByTarget.getOrPut(target) { mutableListOf() } += contribution
+        syncSpeed(target)
+        execute(statusScope(contribution, scope.budget), definition.applied, statusBindings(contribution))
+    }
+
+    private fun statusBindings(status: Contribution) = linkedMapOf("status.stacks" to status.stackExpiries.size.toDouble())
+    private fun statusScope(status: Contribution, budget: Budget) = status.scope.copy(target = status.key.target, ground = null, selected = true, targetGuard = null,
+        lifetime = status.lifetime, budget = budget, originDefinition = status.definition.id)
+
+    private fun tickStatus(status: Contribution, pulse: Boolean) {
+        if (statuses[status.key] !== status) return
+        val target = status.key.target
+        val position = world.position(target)
+        if (!world.availableTarget(status.key.owner, target) || (position != null && !world.loaded(position))) {
+            status.lifetime.cancelled = true
+            prune()
+            return
+        }
+        val time = now(status.key.owner)
+        val before = status.stackExpiries.size
+        if (status.key.membership == null) status.stackExpiries.removeIf { it <= time }
+        val budget = Budget()
+        if (status.stackExpiries.isEmpty()) {
+            removeStatus(status)
+            status.lifetime.cancelled = true
+            prune()
+            syncSpeed(target)
+            // Ordinary expiry gets a new source-owned scope. Cancellation never invokes expiry effects.
+            val root = scopes[status.scope.id] ?: return
+            execute(statusScope(status, budget).copy(lifetime = Lifetime(root.lifetime)), status.definition.expired, statusBindings(status))
+            return
+        }
+        if (before != status.stackExpiries.size) execute(statusScope(status, budget), status.definition.stacksChanged, statusBindings(status))
+        if (pulse && status.definition.periodicTicks > 0 && time >= status.nextPulse && status.lifetime.active) {
+            status.nextPulse = time + status.definition.periodicTicks
+            execute(statusScope(status, budget), status.definition.periodic, statusBindings(status))
+        }
+    }
+
+    private fun syncSpeed(target: UUID) {
+        val bonuses = statusesByTarget[target].orEmpty().filter { it.lifetime.active }.mapNotNull { it.definition.speed }
+        val amount = if (bonuses.firstOrNull()?.combination == BonusCombination.CAPPED_ADD) bonuses.sumOf { it.amount }.coerceAtMost(bonuses.first().cap!!)
+            else bonuses.maxOfOrNull { it.amount } ?: 0.0
+        world.movementSpeedBonus(target, amount)
+    }
+
+    private fun cancelTargetStatuses(target: UUID) {
+        statusesByTarget[target].orEmpty().forEach { it.lifetime.cancelled = true }
+        prune()
+    }
+
+    private fun removeStatus(status: Contribution) {
+        statuses.remove(status.key)
+        statusesByTarget[status.key.target]?.let { contributions ->
+            contributions.remove(status)
+            if (contributions.isEmpty()) statusesByTarget.remove(status.key.target)
         }
     }
 
@@ -384,10 +544,13 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
     }
 
     private fun prune(releaseIdle: Boolean = false) {
+        val removed = statuses.values.filter { !it.lifetime.active }
+        removed.forEach(::removeStatus)
+        removed.map { it.key.target }.toSet().forEach(::syncSpeed)
         pending.removeIf { !it.scope.lifetime.active }
         chains.removeIf { !it.scope.lifetime.active }
         areas.removeIf { !it.lifetime.active }
-        val retained = pending.map { it.scope.id }.toSet() + chains.map { it.scope.id } + areas.map { it.scope.id }
+        val retained = pending.map { it.scope.id }.toSet() + chains.map { it.scope.id } + areas.map { it.scope.id } + statuses.values.map { it.scope.id }
         scopes.entries.removeIf { !it.value.lifetime.active || (releaseIdle && it.key !in retained) }
     }
 
@@ -407,51 +570,56 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
     private fun needsGround(effect: Effect): Boolean = catalog.mechanic(effect).let { mechanic ->
         mechanic.needsGround(effect) || mechanic.nested(effect).any { body -> body.any { needsGround(it) } }
     }
-    private fun estimate(effects: List<Effect>): Long = effects.sumOf { effect ->
-        val nested = catalog.mechanic(effect).nested(effect)
-        val work = when (effect) {
-            is Effect.Repeat -> estimate(effect.effects) * effect.count
-            is Effect.ForEach -> estimate(effect.effects) * effect.selector.limit
-            is Effect.Chain -> estimate(effect.effects) * effect.maxTargets
-            is Effect.Branch -> maxOf(estimate(effect.onTrue), estimate(effect.onFalse))
-            is Effect.CreateArea -> definitions.areas[effect.area]?.let { estimate(it.enter) * it.selector.limit }.orEmptyWork()
-            else -> nested.sumOf { estimate(it) }
-        }
-        (1 + work).coerceAtMost(1_000_000_000)
-    }.coerceAtMost(1_000_000_000)
-    private fun estimatedAreas(effects: List<Effect>): Long = effects.sumOf { effect ->
-        when (effect) {
-            is Effect.CreateArea -> 1L
-            is Effect.Repeat -> effect.count * estimatedAreas(effect.effects)
-            is Effect.ForEach -> effect.selector.limit * estimatedAreas(effect.effects)
-            is Effect.Chain -> effect.maxTargets * estimatedAreas(effect.effects)
-            is Effect.Branch -> maxOf(estimatedAreas(effect.onTrue), estimatedAreas(effect.onFalse))
-            else -> catalog.mechanic(effect).nested(effect).sumOf { estimatedAreas(it) }
-        }.coerceAtMost(1_000_000_000)
-    }.coerceAtMost(1_000_000_000)
-
-    private fun initialSlots(effects: List<Effect>): Long = effects.sumOf { effect ->
-        when (effect) {
-            is Effect.Delay, is Effect.Repeat -> 1L
-            is Effect.Chain -> initialSlots(effect.effects) * (if (effect.delayTicks == 0) effect.maxTargets else 1) + if (effect.delayTicks > 0 && effect.maxTargets > 1) 1 else 0
-            is Effect.ForEach -> initialSlots(effect.effects) * effect.selector.limit
-            is Effect.Branch -> maxOf(initialSlots(effect.onTrue), initialSlots(effect.onFalse))
-            is Effect.CreateArea -> definitions.areas[effect.area]?.let { initialSlots(it.enter) * it.selector.limit }.orEmptyWork()
-            else -> catalog.mechanic(effect).nested(effect).sumOf { initialSlots(it) }
-        }.coerceAtMost(1_000_000_000)
-    }.coerceAtMost(1_000_000_000)
+    private fun estimate(effects: List<Effect>) = estimates.measure(effects, ExecutionEstimates.Kind.WORK)
+    private fun estimatedAreas(effects: List<Effect>) = estimates.measure(effects, ExecutionEstimates.Kind.AREAS)
+    private fun initialSlots(effects: List<Effect>) = estimates.measure(effects, ExecutionEstimates.Kind.SLOTS)
+    private fun estimatedStatuses(effects: List<Effect>) = estimates.measure(effects, ExecutionEstimates.Kind.STATUSES)
 
     private fun now(owner: UUID) = onlineClock[owner] ?: 0L
-    private fun areaDependencies(effects: List<Effect>): MutableMap<String, AreaDef> {
-        val dependencies = linkedMapOf<String, AreaDef>()
+    private fun buffWork(area: AreaDef) = estimates.buffs(area, ExecutionEstimates.Kind.WORK)
+
+    private fun initialStatusKeys(owner: UUID, classId: String, grant: String, ability: AbilityDef, target: UUID?): Set<StatusKey> {
+        val keys = linkedSetOf<StatusKey>()
+        fun collect(effects: List<Effect>) {
+            for (effect in effects) when (effect) {
+                is Effect.ApplyStatus -> (if (effect.target == EffectTarget.ACTOR) owner else target)?.let {
+                    keys += StatusKey(owner, classId, grant, "${ability.id}/${effect.applicationId}", it, null)
+                }
+                // Branches, selections, controllers and continuations have dynamic allocation requirements.
+                is Effect.Branch, is Effect.ForEach, is Effect.Chain, is Effect.CreateArea, is Effect.Delay, is Effect.Repeat -> Unit
+                else -> catalog.mechanic(effect).nested(effect).forEach(::collect)
+            }
+        }
+        collect(ability.effects)
+        return keys
+    }
+
+    private fun controllerBodies(area: AreaDef) = area.enter + area.periodic + area.exit + area.expired
+    private fun controllerDependencies(effects: List<Effect>): ControllerDependencies {
+        val areaDefinitions = linkedMapOf<String, AreaDef>()
+        val statusDefinitions = linkedMapOf<String, StatusDef>()
+        val createdStatuses = mutableSetOf<String>()
+        fun collectStatus(id: String, collect: (List<Effect>) -> Unit) {
+            val status = definitions.statuses[id] ?: return
+            statusDefinitions[id] = status
+            if (createdStatuses.add(id)) collect(status.bodies)
+        }
         fun collect(body: List<Effect>) {
-            for (effect in body.flatMap { catalog.descendants(it).toList() }) for (ref in catalog.mechanic(effect).areas(effect)) {
-                val area = definitions.areas[ref] ?: continue
-                if (dependencies.putIfAbsent(ref, area) == null) collect(area.enter + area.periodic + area.exit + area.expired)
+            for (effect in body.flatMap { catalog.descendants(it).toList() }) {
+                val mechanic = catalog.mechanic(effect)
+                for (ref in mechanic.statuses(effect)) definitions.statuses[ref]?.let { statusDefinitions[ref] = it }
+                for (ref in mechanic.createdStatuses(effect)) collectStatus(ref, ::collect)
+                for (ref in mechanic.areas(effect)) {
+                    val area = definitions.areas[ref] ?: continue
+                    if (areaDefinitions.putIfAbsent(ref, area) == null) {
+                        collect(controllerBodies(area))
+                        area.buffs.forEach { collectStatus(it, ::collect) }
+                    }
+                }
             }
         }
         collect(effects)
-        return dependencies
+        return ControllerDependencies(areaDefinitions, statusDefinitions, createdStatuses)
     }
     private fun changeResource(record: PlayerRecord, classId: String, id: String, delta: Double): Double {
         val resource = definitions.resources[id] ?: error("resource is unavailable")
@@ -466,7 +634,6 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
     private fun balanceKey(classId: String, resource: ResourceDef): String = "${if (resource.scope == ResourceScope.PLAYER) "player" else classId}|${resource.id}"
 }
 
-private fun Long?.orEmptyWork() = this ?: 0L
 private fun Numeric.value(results: Map<String, Double>): Double = when (this) {
     is Numeric.Constant -> value
     is Numeric.Expression -> Expression.evaluate(source, results)

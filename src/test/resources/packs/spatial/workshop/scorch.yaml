@@ -1,0 +1,13 @@
+kind: status
+id: scorch
+duration: 4s
+tags: [harmful, fire]
+reapply: refresh
+stacks: {max: 3, duration: shared}
+periodic:
+  every: 1s
+  effects:
+    - type: damage
+      target: target
+      amount: {expr: '2 * status.stacks'}
+      damage_type: minecraft:magic

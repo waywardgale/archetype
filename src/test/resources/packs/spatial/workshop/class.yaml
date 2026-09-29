@@ -6,3 +6,5 @@ abilities:
   field: {ref: ground_field, slot: secondary}
   aura: {ref: moving_aura, slot: utility}
   query: {ref: beam_query, slot: query}
+  scorch: {ref: apply_scorch, slot: status}
+  cleanse: {ref: cleanse, slot: cleanse}

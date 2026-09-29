@@ -6,7 +6,7 @@ These operations are implemented. The complete v1 catalog and all release gates 
 
 Run `./gradlew exportCatalog` to generate `build/catalog/manifest.schema.json` and `build/catalog/effects.md`. Use `-PcatalogOutput=/absolute/path` to choose a destination. The effect fields, required fields, results, and lifecycle descriptions come from the registrations used by compilation and execution. The schema describes supported structure; reference resolution, result availability, positive intervals, related bounds, and recursive area creation still require the compiler.
 
-Validate the fixture pack with `./gradlew validatePacks -Ppacks=src/test/resources/packs/spatial`. Native damage registry checks require server validation. The fixture pack contains one test class, four grants, a resource, and an area. It demonstrates authoring, not a shipped class roster.
+Validate the fixture pack with `./gradlew validatePacks -Ppacks=src/test/resources/packs/spatial`. Native damage registry checks require server validation. The fixture pack contains one test class, six grants, a resource, an area, and two statuses. It demonstrates authoring, not a shipped class roster.
 
 ## Input and selection
 
@@ -110,7 +110,7 @@ Membership reconciles before periodic pulses and before delayed descendants due 
 
 Each registered controller pulse receives a new bounded execution budget. Delayed descendants keep that pulse's budget and membership lifetime. Current limits are 1024 work units per batch, 2048 per owner per tick, 4096 globally per tick, 128 queued continuations per owner, 2048 queued globally, 32 areas per owner, and 512 areas globally. Known excessive setup and pulse work is rejected before payment; dynamic overload cancels the source. Operator configuration for these bounds remains unfinished.
 
-Membership ownership currently covers delayed effects and nested controllers. Status contributions, membership buffs, status cleanup, maintained lifetimes, area handles, recasts, and correlated event waits remain required. These tests do not complete the full ground-field or moving-aura release scenarios.
+Membership ownership covers delayed effects, nested controllers, and declared `buffs`. An area's optional `buffs` list references statuses that remain active for each membership. Each overlapping area owns its contribution, periodic schedule, and delayed status work. Departure, area expiry, or cancellation removes that contribution before due descendants. Membership loss does not invoke the status's ordinary expiry callback. See [status authoring](status-authoring.md) for syntax, source accounting, and numeric composition. Maintained lifetimes, area handles, recasts, and correlated event waits remain required. Running-world evidence for the ground-field and moving-aura release scenarios remains absent.
 
 ## Mechanic extensions
 
@@ -118,4 +118,4 @@ Membership ownership currently covers delayed effects and nested controllers. St
 
 A Fabric add-on registers through `ArchetypeMod.registerMechanic` during initialization, before the first server starts. The catalog then freezes for the process. Offline exports default to built-ins; an extension tool can pass its catalog explicitly.
 
-An extension decodes through `EffectReader` and executes through bounded `EffectExecution` services. It receives no YAML map at execution. The extension test adds a resource mechanic and binds its result without modifying compiler or runtime dispatch. New native operations and contribution cleanup services still need their engine contracts before world-effect extensions can use them.
+An extension decodes through `EffectReader` and executes through bounded `EffectExecution` services. It receives no YAML map at execution. The extension test adds a resource mechanic and binds its result without modifying compiler or runtime dispatch. Handlers can now apply a status through `EffectExecution.status`, and `statusReferences` participates in reference checks, cycle checks, and reload dependencies. `EffectReader.identity` supplies the authored effect ID or its structural field path. Additional native operations and general contribution cleanup services still need their engine contracts before world-effect extensions can use them.

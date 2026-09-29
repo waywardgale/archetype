@@ -10,6 +10,7 @@ object CatalogExport {
     private fun ref(name: String) = mapOf("\$ref" to "#/\$defs/$name")
     private fun text(pattern: String? = null): Map<String, Any> = mapOf<String, Any>("type" to "string", "minLength" to 1) + if (pattern == null) emptyMap() else mapOf("pattern" to pattern)
     private fun number(min: Double, max: Double) = mapOf("type" to "number", "minimum" to min, "maximum" to max)
+    private fun integer(min: Int, max: Int) = mapOf("type" to "integer", "minimum" to min, "maximum" to max)
     private fun enum(vararg choices: String) = mapOf("enum" to choices.toList())
     private fun obj(properties: Map<String, Any>, required: List<String> = properties.keys.toList()) = mapOf(
         "type" to "object", "properties" to properties, "required" to required, "additionalProperties" to false,
@@ -30,6 +31,7 @@ object CatalogExport {
         val conditions = listOf(
             obj(mapOf("type" to mapOf("const" to "compare"), "left" to ref("numeric"), "op" to enum("lt", "lte", "eq", "gte", "gt"), "right" to ref("numeric"))),
             obj(mapOf("type" to mapOf("const" to "resource_at_least"), "resource" to text(), "amount" to ref("numeric"))),
+            obj(BuiltinEffects.statusFilterFields + mapOf("type" to mapOf("const" to "has_status"), "target" to enum("actor", "target")), listOf("type", "target")),
         )
         val sizes = number(0.01, 32.0)
         fun shape(type: String, fields: Map<String, Any>, optional: Set<String> = emptySet()) = obj(fields + ("type" to mapOf("const" to type)), listOf("type") + (fields.keys - optional))
@@ -68,6 +70,7 @@ object CatalogExport {
                 obj(mapOf("expr" to (text() + mapOf("maxLength" to 256)))),
             )),
             "reference" to reference,
+            "status_tags" to (array(text("^(?:[a-z0-9_.-]+:)?[a-z0-9_./-]+$") + mapOf("maxLength" to 128), 16, 1) + mapOf("uniqueItems" to true)),
             "effect" to mapOf("oneOf" to effects),
             "condition" to mapOf("oneOf" to conditions),
             "shape" to mapOf("oneOf" to shapes),
@@ -85,9 +88,20 @@ object CatalogExport {
             "area" to obj(mapOf(
                 "kind" to mapOf("const" to "area"), "id" to text(), "shape" to ref("shape"), "duration" to duration,
                 "sample_every" to duration, "targets" to ref("selector"),
-                "enter" to array(ref("effect"), 64), "exit" to array(ref("effect"), 64), "expired" to array(ref("effect"), 64),
+                "enter" to array(ref("effect"), 64), "exit" to array(ref("effect"), 64), "expired" to array(ref("effect"), 64), "buffs" to array(ref("reference"), 16),
                 "periodic" to obj(mapOf("every" to duration, "effects" to array(ref("effect"), 64, 1))),
             ), listOf("kind", "id", "shape", "duration", "targets")),
+            "status" to obj(mapOf(
+                "kind" to mapOf("const" to "status"), "id" to text(), "duration" to duration, "reapply" to mapOf("const" to "refresh"),
+                "tags" to ref("status_tags"),
+                "stacks" to obj(mapOf("max" to integer(1, 64), "duration" to enum("shared", "per_stack")), listOf("max")),
+                "applied" to array(ref("effect"), 64), "refreshed" to array(ref("effect"), 64), "stacks_changed" to array(ref("effect"), 64), "expired" to array(ref("effect"), 64),
+                "periodic" to obj(mapOf("every" to duration, "effects" to array(ref("effect"), 64, 1))),
+                "modifiers" to array(mapOf("oneOf" to listOf(
+                    obj(mapOf("type" to mapOf("const" to "attribute"), "attribute" to mapOf("const" to "minecraft:movement_speed"), "amount" to number(0.0, 1.0), "stacking" to mapOf("const" to "strongest")), listOf("type", "attribute", "amount")),
+                    obj(mapOf("type" to mapOf("const" to "attribute"), "attribute" to mapOf("const" to "minecraft:movement_speed"), "amount" to number(0.0, 1.0), "stacking" to mapOf("const" to "capped_add"), "cap" to number(0.0, 1.0))),
+                )), 1),
+            ), listOf("kind", "id", "duration")),
             "class" to obj(mapOf(
                 "kind" to mapOf("const" to "class"), "id" to text(), "name" to text(),
                 "abilities" to mapOf("type" to "object", "maxProperties" to 128, "propertyNames" to (localId + mapOf("maxLength" to 128)),
@@ -102,7 +116,7 @@ object CatalogExport {
             "title" to "Archetype supported manifest grammar",
             "description" to "Structural editor schema. Run validatePacks for result availability, references, positive intervals, related bounds and recursion. Native registry checks require the server.",
             "\$defs" to definitions,
-            "oneOf" to listOf("pack", "ability", "resource", "area", "class").map(::ref),
+            "oneOf" to listOf("pack", "ability", "resource", "area", "status", "class").map(::ref),
         )
     }
 

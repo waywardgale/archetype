@@ -12,8 +12,9 @@ class GeometryCatalogTest {
         val result = ManifestCompiler().compile(PackCapture.capture(root))
         assertTrue(result is CompileResult.Valid, "$result")
         val definitions = (result as CompileResult.Valid).definitions
-        assertEquals(4, definitions.classes.getValue("workshop:validation_actor").grants.size)
+        assertEquals(6, definitions.classes.getValue("workshop:validation_actor").grants.size)
         assertEquals(1, definitions.areas.size)
+        assertEquals(2, definitions.statuses.size)
     }
     @Test fun `all combat shapes include boundaries and exclude nearby points outside`() {
         val cases = listOf(

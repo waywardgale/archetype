@@ -46,7 +46,7 @@ object ArchetypeMod : ModInitializer {
             val catalog = freezeCatalog()
             session = Session(server, root, catalog).also { it.loadInitial() }
         }
-        ServerLifecycleEvents.SERVER_STOPPING.register { session?.saveAll(); session = null }
+        ServerLifecycleEvents.SERVER_STOPPING.register { session?.runtime?.shutdown(); session?.saveAll(); session = null }
         ServerTickEvents.END_SERVER_TICK.register { session?.tick() }
         ServerPlayConnectionEvents.JOIN.register { handler, _, _ ->
             if (!ServerPlayNetworking.canSend(handler, StatePayload.TYPE)) {
@@ -55,7 +55,7 @@ object ArchetypeMod : ModInitializer {
         }
         ServerPlayConnectionEvents.DISCONNECT.register { handler, _ -> session?.leave(handler.player.uuid) }
         ServerLivingEntityEvents.AFTER_DEATH.register { entity, _ ->
-            if (entity is ServerPlayer) session?.runtime?.onDeath(entity.uuid)
+            session?.runtime?.onDeath(entity.uuid)
         }
         ServerPlayNetworking.registerGlobalReceiver(SelectClassPayload.TYPE) { payload, context ->
             context.server().execute {
@@ -170,7 +170,7 @@ object ArchetypeMod : ModInitializer {
                 }
                 is CompileResult.Valid -> {
                     val allAbilities = result.definitions.abilities.values + result.definitions.classes.values.flatMap { it.grants.values.map { grant -> grant.ability } }
-                    val allEffects = allAbilities.flatMap { it.effects } + result.definitions.areas.values.flatMap { it.enter + it.periodic + it.exit + it.expired }
+                    val allEffects = allAbilities.flatMap { it.effects } + result.definitions.areas.values.flatMap { it.enter + it.periodic + it.exit + it.expired } + result.definitions.statuses.values.flatMap { it.bodies }
                     val unknownTypes = allEffects
                         .flatMap { catalog.descendants(it).toList() }
                         .filterIsInstance<Effect.Damage>()

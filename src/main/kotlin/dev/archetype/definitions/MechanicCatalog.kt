@@ -13,6 +13,8 @@ class EffectMechanic<E : Effect>(
     val localBindings: Set<String> = emptySet(),
     val resourceReferences: (E) -> List<String> = { emptyList() },
     val areaReferences: (E) -> List<String> = { emptyList() },
+    val statusReferences: (E) -> List<String> = { emptyList() },
+    val statusCreations: (E) -> List<String> = statusReferences,
     val requiresTarget: (E) -> Boolean = { false },
     val requiresEntityTarget: (E) -> Boolean = requiresTarget,
     val requiresGround: (E) -> Boolean = { false },
@@ -24,6 +26,8 @@ class EffectMechanic<E : Effect>(
     fun nested(effect: Effect) = children(configuration.cast(effect))
     fun resources(effect: Effect) = resourceReferences(configuration.cast(effect))
     fun areas(effect: Effect) = areaReferences(configuration.cast(effect))
+    fun statuses(effect: Effect) = statusReferences(configuration.cast(effect))
+    fun createdStatuses(effect: Effect) = statusCreations(configuration.cast(effect))
     fun needsTarget(effect: Effect) = requiresTarget(configuration.cast(effect))
     fun needsEntityTarget(effect: Effect) = requiresEntityTarget(configuration.cast(effect))
     fun needsGround(effect: Effect) = requiresGround(configuration.cast(effect))
@@ -58,9 +62,11 @@ interface EffectReader {
     fun spatialTarget(key: String, default: SpatialTarget = SpatialTarget.ACTOR): SpatialTarget
     fun effects(key: String, required: Boolean = true): List<Effect>
     fun condition(key: String): Condition
+    fun statusFilter(): StatusFilter
     fun selector(key: String, shape: Shape? = null): Selector
     fun anchor(key: String): Anchor
     val resultName: String?
+    val identity: String
 }
 
 /** Runtime services available to registered handlers. The implementation owns budgets and cleanup. */
@@ -73,6 +79,8 @@ interface EffectExecution {
     fun forEach(effect: Effect.ForEach)
     fun chain(effect: Effect.Chain)
     fun area(effect: Effect.CreateArea)
+    fun status(effect: Effect.ApplyStatus)
+    fun dispel(effect: Effect.Dispel): Map<String, Double>?
 }
 
 data class Healing(val restored: Double, val overheal: Double)
@@ -88,7 +96,23 @@ object BuiltinEffects {
     private val target = mapOf<String, Any>("enum" to listOf("actor", "target"))
     private val spatial = mapOf<String, Any>("enum" to listOf("actor", "target", "ground"))
     private val bool = mapOf<String, Any>("type" to "boolean")
+    val statusFilterFields = mapOf(
+        "status" to ref("reference"), "tags" to ref("status_tags"),
+        "source" to mapOf<String, Any>("enum" to listOf("any", "actor", "grant"), "default" to "any"),
+    )
     val catalog = MechanicCatalog(listOf(
+        EffectMechanic("archetype:apply_status", Effect.ApplyStatus::class.java, mapOf("status" to ref("reference"), "target" to target), setOf("status", "target"), "Refreshes a stable source contribution without restarting its periodic cadence. Temporary presence remains owned by the source class.",
+            statusReferences = { listOf(it.status) }, requiresTarget = { it.target == EffectTarget.TARGET },
+            decode = { Effect.ApplyStatus(it.reference("status"), it.target("target"), it.identity) },
+            execute = { e, c -> c.status(e); null }),
+        EffectMechanic("archetype:dispel", Effect.Dispel::class.java,
+            statusFilterFields + mapOf("target" to target, "count" to (integer(1, 64) + ("default" to 1))), setOf("target"),
+            "Removes up to count matching source contributions, oldest application first. Cancels owned work without expiry callbacks. Other contributions and the enclosing area membership remain active.",
+            setOf("contributions_removed", "stacks_removed"),
+            statusReferences = { listOfNotNull(it.filter.status) }, statusCreations = { emptyList() },
+            requiresTarget = { it.target == EffectTarget.TARGET },
+            decode = { Effect.Dispel(it.target("target"), it.statusFilter(), it.integer("count", 1, 64, 1), it.resultName) },
+            execute = { e, c -> c.dispel(e) }),
         EffectMechanic("archetype:heal", Effect.Heal::class.java, mapOf("target" to target, "amount" to numeric), setOf("target", "amount"), "Immediate native healing.", setOf("health_restored", "overheal"),
             numericInputs = { mapOf("amount" to it.amount) }, requiresTarget = { it.target == EffectTarget.TARGET },
             decode = { Effect.Heal(it.target("target"), it.numeric("amount"), it.resultName) },
@@ -118,8 +142,12 @@ object BuiltinEffects {
             numericInputs = { when (val condition = it.condition) {
                 is Condition.Compare -> mapOf("when.left" to condition.left, "when.right" to condition.right)
                 is Condition.ResourceAtLeast -> mapOf("when.amount" to condition.amount)
+                is Condition.HasStatus -> emptyMap()
             } },
             resourceReferences = { (it.condition as? Condition.ResourceAtLeast)?.let { listOf(it.resource) }.orEmpty() },
+            statusReferences = { (it.condition as? Condition.HasStatus)?.let { listOfNotNull(it.filter.status) }.orEmpty() },
+            statusCreations = { emptyList() },
+            requiresTarget = { (it.condition as? Condition.HasStatus)?.target == EffectTarget.TARGET },
             decode = { Effect.Branch(it.condition("when"), it.effects("then"), it.effects("else", false)) },
             execute = { e, c -> c.branch(e.condition, e.onTrue, e.onFalse); null }),
         EffectMechanic("archetype:for_each", Effect.ForEach::class.java, mapOf("origin" to spatial, "targets" to ref("shaped_selector"), "effects" to body), setOf("targets", "effects"), "Bounded fresh selection; each target receives private bindings. Delays retain the selected target.",

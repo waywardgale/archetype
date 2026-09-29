@@ -8,6 +8,7 @@ targets:
   include_actor: true
   limit: 16
   filters: [{type: relation, is: ally}]
+buffs: [{ref: field_haste}]
 periodic:
   every: 1s
   effects:

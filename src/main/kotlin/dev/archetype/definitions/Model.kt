@@ -36,11 +36,17 @@ interface Effect {
     data class ForEach(val origin: SpatialTarget, val selector: Selector, val effects: List<Effect>) : Effect { override val resultName: String? = null }
     data class Chain(val maxTargets: Int, val hopRange: Double, val delayTicks: Int, val revisit: Boolean, val selector: Selector, val effects: List<Effect>) : Effect { override val resultName: String? = null }
     data class CreateArea(val area: String, val anchor: Anchor) : Effect { override val resultName: String? = null }
+    data class ApplyStatus(val status: String, val target: EffectTarget, val applicationId: String) : Effect { override val resultName: String? = null }
+    data class Dispel(val target: EffectTarget, val filter: StatusFilter, val count: Int, override val resultName: String?) : Effect
 }
+
+enum class StatusSource { ANY, ACTOR, GRANT }
+data class StatusFilter(val status: String? = null, val tags: Set<String> = emptySet(), val source: StatusSource = StatusSource.ANY)
 
 sealed interface Condition {
     data class ResourceAtLeast(val resource: String, val amount: Numeric) : Condition
     data class Compare(val left: Numeric, val operator: String, val right: Numeric) : Condition
+    data class HasStatus(val target: EffectTarget, val filter: StatusFilter) : Condition
 }
 
 fun Effect.descendants(): Sequence<Effect> = BuiltinEffects.catalog.descendants(this)
@@ -69,7 +75,22 @@ data class AreaDef(
     val periodicTicks: Int,
     val exit: List<Effect>,
     val expired: List<Effect>,
+    val buffs: List<String> = emptyList(),
 )
+
+enum class StackDuration { SHARED, PER_STACK }
+data class StatusStacks(val maximum: Int, val duration: StackDuration)
+enum class BonusCombination { STRONGEST, CAPPED_ADD }
+data class SpeedBonus(val amount: Double, val combination: BonusCombination, val cap: Double?)
+data class StatusDef(
+    val id: String, val durationTicks: Int, val stacks: StatusStacks?,
+    val periodicTicks: Int, val periodic: List<Effect>,
+    val applied: List<Effect>, val refreshed: List<Effect>, val stacksChanged: List<Effect>, val expired: List<Effect>,
+    val speed: SpeedBonus?,
+    val tags: Set<String> = emptySet(),
+) {
+    val bodies: List<Effect> get() = applied + refreshed + stacksChanged + periodic + expired
+}
 
 data class Grant(val name: String, val slot: String?, val ability: AbilityDef)
 data class ClassDef(val id: String, val name: String, val grants: Map<String, Grant>)
@@ -81,6 +102,7 @@ data class DefinitionSet(
     val classes: Map<String, ClassDef>,
     val fingerprint: String,
     val areas: Map<String, AreaDef> = emptyMap(),
+    val statuses: Map<String, StatusDef> = emptyMap(),
 )
 
 sealed interface CompileResult {

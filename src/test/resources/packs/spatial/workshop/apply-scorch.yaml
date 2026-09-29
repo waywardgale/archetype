@@ -1,0 +1,11 @@
+kind: ability
+id: apply_scorch
+name: Status fixture
+target: {type: entity, range: 16}
+cooldown: 1s
+costs: [{resource: focus, amount: 3}]
+effects:
+  - type: apply_status
+    id: scorch_application
+    status: {ref: scorch}
+    target: target

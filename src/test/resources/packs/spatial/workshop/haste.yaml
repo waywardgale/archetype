@@ -1,0 +1,9 @@
+kind: status
+id: field_haste
+duration: 2s
+tags: [beneficial]
+reapply: refresh
+modifiers:
+  - type: attribute
+    attribute: minecraft:movement_speed
+    amount: 0.02

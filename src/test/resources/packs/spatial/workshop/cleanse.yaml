@@ -1,0 +1,18 @@
+kind: ability
+id: cleanse
+name: Cleanse fixture
+target: {type: entity, range: 16}
+cooldown: 1s
+costs: [{resource: focus, amount: 2}]
+effects:
+  - type: branch
+    when: {type: has_status, target: target, tags: [harmful]}
+    then:
+      - type: dispel
+        target: target
+        tags: [harmful]
+        count: 4
+        as: cleansed
+      - type: heal
+        target: target
+        amount: {expr: 'result.cleansed.stacks_removed'}
