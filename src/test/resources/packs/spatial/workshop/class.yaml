@@ -16,3 +16,19 @@ abilities:
   silence: {ref: apply_silence, slot: silence}
   random: {ref: random_blessing, slot: random}
   resource: {ref: resource_reset, slot: resource}
+  barrier: {ref: absorb_burst, slot: barrier}
+  passive: {ref: passive_focus}
+  fragile: {ref: apply_fragile_mark, slot: fragile}
+  maintained: {ref: maintained_passive}
+  stance: {ref: stance_counter, slot: stance}
+  bolt: {ref: launch_fixture_bolt, slot: bolt}
+  memory: {ref: apply_memory_mark, slot: memory}
+  memory_detonate: {ref: memory_detonate, slot: memory_detonate}
+  parallel: {ref: parallel_ritual, slot: parallel}
+  toggle: {ref: toggle_aura, slot: toggle}
+  channel: {ref: channel_focus, slot: channel}
+  charge: {ref: charged_heal, slot: charge}
+  form_attack: {ref: form_attack, slot: form_attack}
+  enter_form: {ref: enter_form, slot: enter_form}
+  confirm_strike: {ref: confirm_strike, slot: confirm_strike}
+  recast_field: {ref: recast_field, slot: recast_field}

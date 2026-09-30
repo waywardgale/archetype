@@ -1,0 +1,7 @@
+kind: state
+id: stance
+scope: class
+persistent: true
+fields:
+  mode: {type: enum, values: [steady, mobile], initial: steady}
+  hits: {type: integer, min: 0, max: 3, initial: 0}

@@ -4,6 +4,7 @@ import dev.archetype.minecraft.PlayerStore
 import dev.archetype.runtime.PlayerRecord
 import dev.archetype.runtime.ChargeState
 import dev.archetype.definitions.RechargeMode
+import dev.archetype.definitions.StateValue
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
@@ -23,6 +24,8 @@ class PlayerStoreTest {
             cooldowns["workshop:fighter|primary"] = 35
             regenerationTimers["workshop:fighter|workshop:focus"] = 12
             charges["workshop:fighter|primary"] = ChargeState(3, 1, RechargeMode.PARALLEL, mutableListOf(7, 18))
+            persistentStates["workshop:fighter|workshop:stance|hits"] = StateValue.Number(2.0)
+            persistentStates["player|workshop:stance|mode"] = StateValue.Mode("steady")
         }
         val store = PlayerStore(directory)
         store.save(id, record)
@@ -34,6 +37,7 @@ class PlayerStoreTest {
         assertEquals(record.cooldowns, loaded.cooldowns)
         assertEquals(record.regenerationTimers, loaded.regenerationTimers)
         assertEquals(record.charges, loaded.charges)
+        assertEquals(record.persistentStates, loaded.persistentStates)
     }
 
     @Test fun `older player records without charges remain readable`() {

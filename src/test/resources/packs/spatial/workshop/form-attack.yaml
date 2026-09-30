@@ -1,0 +1,5 @@
+kind: ability
+id: form_attack
+name: Form attack fixture
+effects:
+  - {type: heal, target: actor, amount: 1}

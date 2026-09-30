@@ -1,0 +1,5 @@
+kind: state
+id: mark_memory
+scope: status
+fields:
+  pulses: {type: integer, min: 0, max: 5, initial: 0}

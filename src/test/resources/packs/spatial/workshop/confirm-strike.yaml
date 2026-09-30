@@ -1,0 +1,7 @@
+kind: ability
+id: confirm_strike
+name: Confirm strike
+activation: {type: confirm, window: 5s}
+target: {type: entity, range: 12}
+effects:
+  - {type: damage, target: target, amount: 3, damage_type: minecraft:magic}

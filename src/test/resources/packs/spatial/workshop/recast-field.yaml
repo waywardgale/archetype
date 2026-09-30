@@ -1,0 +1,8 @@
+kind: ability
+id: recast_field
+name: Recast field
+activation: {type: recast, window: 5s}
+effects:
+  - {type: create_area, area: maintained_field, anchor: {attached: actor}}
+recast_effects:
+  - {type: heal, target: actor, amount: 3}

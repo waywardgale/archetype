@@ -4,15 +4,24 @@ import dev.archetype.definitions.*
 
 /** Static reservations for validated acyclic definitions. Runtime still bounds dynamic selection and pulses. */
 internal class ExecutionEstimates(private val definitions: DefinitionSet, private val catalog: MechanicCatalog) {
-    enum class Kind { WORK, AREAS, STATUSES, SLOTS, TIMERS }
+    enum class Kind { WORK, AREAS, STATUSES, SLOTS, TIMERS, PROJECTILES, WAITS, PARALLELS }
     private val controllers = mutableMapOf<Pair<String, Kind>, Long>()
     fun measure(effects: List<Effect>, kind: Kind): Long = effects.sumOf { effect ->
         val descendants = when (effect) {
             is Effect.CreateArea -> area(effect.area, kind)
             is Effect.ApplyStatus -> status(effect.status, kind) + if (kind == Kind.STATUSES) 1L else 0L
-            is Effect.Dispel, is Effect.ConsumeStatus, is Effect.ReadStatus -> if (kind == Kind.WORK) 64L else 0L
+            is Effect.Dispel, is Effect.ConsumeStatus, is Effect.ReadStatus, is Effect.ReadStatusState, is Effect.WriteStatusState -> if (kind == Kind.WORK) 64L else 0L
             // Expiry starts a separate bounded pulse. Its body is not part of setup reservation.
             is Effect.SetTimer -> if (kind == Kind.TIMERS) 1L else 0L
+            is Effect.WaitFor -> if (kind == Kind.SLOTS || kind == Kind.WAITS) 1L else 0L
+            is Effect.Parallel -> {
+                val branches = effect.branches.sumOf { branch -> measure(branch.effects, kind) +
+                    (if (kind == Kind.SLOTS && branch.afterTicks > 0) 1L else 0L) +
+                    (if (kind == Kind.WORK) branch.successWhen?.leaves()?.count { it is Condition.HasStatus }?.times(64L) ?: 0L else 0L) }
+                branches + maxOf(measure(effect.then, kind), measure(effect.failed, kind)) +
+                    if (kind == Kind.PARALLELS || kind == Kind.SLOTS) 1L else 0L
+            }
+            is Effect.LaunchProjectile -> if (kind == Kind.PROJECTILES) 1L else 0L
             is Effect.Delay -> if (kind == Kind.SLOTS) 1L else measure(effect.effects, kind)
             is Effect.Repeat -> if (kind == Kind.SLOTS) 1L else measure(effect.effects, kind) * effect.count
             is Effect.ForEach -> measure(effect.effects, kind) * effect.selector.limit

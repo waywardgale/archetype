@@ -1,0 +1,12 @@
+kind: ability
+id: stance_counter
+name: Stance counter fixture
+effects:
+  - {type: add_state, state: stance, field: hits, amount: 1}
+  - type: branch
+    when: {type: state_is, state: stance, field: hits, value: 3}
+    then:
+      - {type: set_state, state: stance, field: mode, value: mobile}
+      - {type: reset_state, state: stance, field: hits}
+  - {type: read_state, state: stance, field: hits, as: count}
+  - {type: heal, target: actor, amount: {expr: "result.count.value"}}

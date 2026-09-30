@@ -1,0 +1,14 @@
+kind: projectile
+id: fixture_bolt
+parameters:
+  damage: {type: number, min: 0, max: 20}
+speed: 24
+gravity: 0
+lifetime: 3s
+collision: {entities: enemies, blocks: solid}
+entity_hit:
+  - {type: damage, target: event.target, amount: {expr: "params.damage"}, damage_type: minecraft:magic}
+block_hit:
+  - {type: gain_resource, resource: focus, amount: 1}
+expiry:
+  - {type: heal, target: actor, amount: 1}

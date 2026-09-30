@@ -1,0 +1,9 @@
+kind: status
+id: memory_mark
+state: mark_memory
+duration: 5s
+periodic:
+  every: 1s
+  effects:
+    - {type: add_state, state: mark_memory, field: pulses, amount: 1}
+    - {type: heal, target: target, amount: {expr: "state.workshop.mark_memory.pulses"}}

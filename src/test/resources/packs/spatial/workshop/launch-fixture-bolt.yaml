@@ -1,0 +1,11 @@
+kind: ability
+id: launch_fixture_bolt
+name: Launch fixture bolt
+effects:
+  - {type: launch_projectile, projectile: {ref: fixture_bolt, with: {damage: 3}}, direction: actor.aim, as: shot}
+  - type: wait_for
+    handle: result.shot.handle
+    event: projectile.entity_hit
+    timeout: 3s
+    matched:
+      - {type: heal, target: actor, amount: 1}

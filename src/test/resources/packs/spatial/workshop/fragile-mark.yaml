@@ -1,0 +1,6 @@
+kind: status
+id: fragile_mark
+duration: 8s
+break_on_damage: {minimum_health_loss: 1}
+broken:
+  - {type: gain_resource, resource: focus, amount: 1}

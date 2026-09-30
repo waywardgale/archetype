@@ -12,6 +12,8 @@ class EffectMechanic<E : Effect>(
     val children: (E) -> List<List<Effect>> = { emptyList() },
     val localBindings: Set<String> = emptySet(),
     val resourceReferences: (E) -> List<String> = { emptyList() },
+    val stateReferences: (E) -> List<String> = { emptyList() },
+    val projectileReferences: (E) -> List<String> = { emptyList() },
     val areaReferences: (E) -> List<String> = { emptyList() },
     val statusReferences: (E) -> List<String> = { emptyList() },
     val statusCreations: (E) -> List<String> = statusReferences,
@@ -26,6 +28,8 @@ class EffectMechanic<E : Effect>(
     fun inputs(effect: Effect) = numericInputs(configuration.cast(effect))
     fun nested(effect: Effect) = children(configuration.cast(effect))
     fun resources(effect: Effect) = resourceReferences(configuration.cast(effect))
+    fun states(effect: Effect) = stateReferences(configuration.cast(effect))
+    fun projectiles(effect: Effect) = projectileReferences(configuration.cast(effect))
     fun areas(effect: Effect) = areaReferences(configuration.cast(effect))
     fun statuses(effect: Effect) = statusReferences(configuration.cast(effect))
     fun createdStatuses(effect: Effect) = statusCreations(configuration.cast(effect))
@@ -62,12 +66,15 @@ interface EffectReader {
     fun number(key: String, min: Double, max: Double, default: Double? = null): Double
     fun boolean(key: String, default: Boolean): Boolean
     fun numeric(key: String): Numeric
+    fun stateInput(key: String): StateInput
     fun duration(key: String, positive: Boolean = false, default: Int? = null): Int
     fun reference(key: String): String
+    fun referenceWith(key: String): Pair<String, Map<String, Numeric>>
     fun target(key: String): EffectTarget
     fun spatialTarget(key: String, default: SpatialTarget = SpatialTarget.ACTOR): SpatialTarget
     fun effects(key: String, required: Boolean = true): List<Effect>
     fun choices(key: String): List<WeightedBranch>
+    fun parallelBranches(key: String): List<ParallelBranch>
     fun condition(key: String): Condition
     fun statusFilter(): StatusFilter
     fun selector(key: String, shape: Shape? = null): Selector
@@ -81,6 +88,7 @@ interface EffectExecution {
     fun heal(target: EffectTarget, amount: Numeric): Healing?
     fun damage(target: EffectTarget, amount: Numeric, damageType: String): Double?
     fun readHealth(target: EffectTarget): Map<String, Double>?
+    fun shield(effect: Effect.Shield): Map<String, Double>?
     fun resource(id: String, amount: Numeric, spend: Boolean): Double
     fun setResource(id: String, value: Numeric?): Map<String, Double>
     fun delay(ticks: Int, effects: List<Effect>, count: Int = 1, every: Int = 0)
@@ -102,6 +110,15 @@ interface EffectExecution {
     fun reduceRecharge(effect: Effect.ReduceRecharge): Map<String, Double>
     fun reduceGroupCooldown(effect: Effect.ReduceGroupCooldown): Map<String, Double>
     fun reduceGlobalCooldown(effect: Effect.ReduceGlobalCooldown): Map<String, Double>
+    fun setState(effect: Effect.SetState): Map<String, Double>
+    fun addState(effect: Effect.AddState): Map<String, Double>
+    fun resetState(effect: Effect.ResetState): Map<String, Double>
+    fun readState(effect: Effect.ReadState): Map<String, Double>
+    fun readStatusState(effect: Effect.ReadStatusState): Map<String, Double>?
+    fun writeStatusState(effect: Effect.WriteStatusState): Map<String, Double>?
+    fun launchProjectile(effect: Effect.LaunchProjectile): Map<String, Double>?
+    fun waitFor(effect: Effect.WaitFor)
+    fun parallel(effect: Effect.Parallel)
 }
 
 data class Healing(val restored: Double, val overheal: Double)
@@ -114,16 +131,147 @@ object BuiltinEffects {
     private fun ref(name: String) = mapOf<String, Any>("\$ref" to "#/\$defs/$name")
     private val numeric = ref("numeric")
     private val body = mapOf<String, Any>("type" to "array", "minItems" to 1, "maxItems" to 64, "items" to ref("effect"))
-    private val target = mapOf<String, Any>("enum" to listOf("actor", "target"))
-    private val spatial = mapOf<String, Any>("enum" to listOf("actor", "target", "ground"))
+    private val target = mapOf<String, Any>("enum" to listOf("actor", "target", "event.target"))
+    private val spatial = mapOf<String, Any>("enum" to listOf("actor", "target", "ground", "event.position"))
     private val bool = mapOf<String, Any>("type" to "boolean")
     private val timerName = mapOf<String, Any>("type" to "string", "pattern" to "^[a-z0-9_./-]{1,64}$")
     private val grantName = mapOf<String, Any>("type" to "string", "pattern" to "^[a-z0-9_./-]{1,128}$")
+    private val stateValue = mapOf<String, Any>("oneOf" to listOf(numeric, bool, text))
     val statusFilterFields = mapOf(
         "status" to ref("reference"), "tags" to ref("status_tags"),
         "source" to mapOf<String, Any>("enum" to listOf("any", "actor", "grant"), "default" to "any"),
     )
     val catalog = MechanicCatalog(listOf(
+        EffectMechanic("archetype:parallel", Effect.Parallel::class.java,
+            mapOf("join" to mapOf<String, Any>("enum" to listOf("all", "first_success")),
+                "branches" to mapOf<String, Any>("type" to "array", "minItems" to 2, "maxItems" to 8,
+                    "items" to mapOf("type" to "object", "properties" to mapOf("after" to duration, "effects" to body,
+                        "success_when" to ref("condition")), "required" to listOf("effects"), "additionalProperties" to false)),
+                "then" to (body + ("minItems" to 0)), "failed" to (body + ("minItems" to 0))),
+            setOf("join", "branches"),
+            "Runs 2..8 declaration-ordered branches on the server with private bindings and one shared work budget. Join waits for all successful branches or the first branch whose success_when passes; a failed join runs failed. Losing race branches are cancelled without undoing completed effects.",
+            children = { it.branches.map(ParallelBranch::effects) + listOf(it.then, it.failed) },
+            localBindings = setOf("parallel.index", "parallel.completed"),
+            numericInputs = { parallel -> parallel.branches.flatMapIndexed { index, branch ->
+                branch.successWhen?.leaves()?.toList().orEmpty().flatMapIndexed { leaf, condition -> when (condition) {
+                    is Condition.Compare -> listOf("branches[$index].success_when[$leaf].left" to condition.left,
+                        "branches[$index].success_when[$leaf].right" to condition.right)
+                    is Condition.ResourceAtLeast -> listOf("branches[$index].success_when[$leaf].amount" to condition.amount)
+                    else -> emptyList()
+                } }
+            }.toMap() },
+            resourceReferences = { parallel -> parallel.branches.flatMap { it.successWhen?.leaves()?.filterIsInstance<Condition.ResourceAtLeast>()?.map(Condition.ResourceAtLeast::resource)?.toList().orEmpty() } },
+            statusReferences = { parallel -> parallel.branches.flatMap { it.successWhen?.leaves()?.filterIsInstance<Condition.HasStatus>()?.mapNotNull { leaf -> leaf.filter.status }?.toList().orEmpty() } },
+            statusCreations = { emptyList() },
+            stateReferences = { parallel -> parallel.branches.flatMap { it.successWhen?.leaves()?.filterIsInstance<Condition.StateIs>()?.map(Condition.StateIs::state)?.toList().orEmpty() } },
+            requiresTarget = { parallel -> parallel.branches.any { it.successWhen?.leaves()?.filterIsInstance<Condition.HasStatus>()?.any { leaf -> leaf.target == EffectTarget.TARGET } == true } },
+            decode = { reader ->
+                val join = when (reader.option("join", setOf("all", "first_success"), "all")) {
+                    "all" -> ParallelJoin.ALL
+                    "first_success" -> ParallelJoin.FIRST_SUCCESS
+                    else -> error("invalid parallel join")
+                }
+                Effect.Parallel(reader.parallelBranches("branches"), join, reader.effects("then", false), reader.effects("failed", false))
+            }, execute = { e, c -> c.parallel(e); null }),
+        EffectMechanic("archetype:read_status_state", Effect.ReadStatusState::class.java,
+            statusFilterFields + mapOf("state" to ref("reference"), "field" to timerName, "target" to target),
+            setOf("state", "field", "target"),
+            "Reads the sum of a numeric or Boolean field across matching live status contributions on one recipient. Returns zero when no matching contribution exists.",
+            setOf("value", "contributions"), stateReferences = { listOf(it.state) },
+            statusReferences = { listOfNotNull(it.filter.status) }, statusCreations = { emptyList() },
+            requiresTarget = { it.target == EffectTarget.TARGET },
+            decode = { Effect.ReadStatusState(it.reference("state"), it.localId("field"), it.target("target"), it.statusFilter(), it.resultName) },
+            execute = { e, c -> c.readStatusState(e) }),
+        EffectMechanic("archetype:write_status_state", Effect.WriteStatusState::class.java,
+            statusFilterFields + mapOf("state" to ref("reference"), "field" to timerName, "target" to target,
+                "operation" to mapOf("enum" to listOf("set", "add", "reset")), "value" to stateValue, "amount" to numeric),
+            setOf("state", "field", "target", "operation"),
+            "Writes a declared field on every matching live status contribution. Set, add, and reset use the contribution's own state map; returns the number changed and numeric sums when available.",
+            setOf("contributions", "previous", "current"),
+            numericInputs = { effect -> when (effect.operation) {
+                StatusStateOperation.SET -> (effect.value as? StateInput.Number)?.let { mapOf("value" to it.value) } ?: emptyMap()
+                StatusStateOperation.ADD -> effect.amount?.let { mapOf("amount" to it) } ?: emptyMap()
+                StatusStateOperation.RESET -> emptyMap()
+            } },
+            stateReferences = { listOf(it.state) }, statusReferences = { listOfNotNull(it.filter.status) },
+            statusCreations = { emptyList() }, requiresTarget = { it.target == EffectTarget.TARGET },
+            decode = { reader ->
+                val operation = when (reader.option("operation", setOf("set", "add", "reset"), "set")) {
+                    "set" -> StatusStateOperation.SET
+                    "add" -> StatusStateOperation.ADD
+                    "reset" -> StatusStateOperation.RESET
+                    else -> error("invalid status state operation")
+                }
+                if (operation == StatusStateOperation.SET && (!reader.has("value") || reader.has("amount")))
+                    error("set requires value and forbids amount")
+                if (operation == StatusStateOperation.ADD && (!reader.has("amount") || reader.has("value")))
+                    error("add requires amount and forbids value")
+                if (operation == StatusStateOperation.RESET && (reader.has("value") || reader.has("amount")))
+                    error("reset forbids value and amount")
+                Effect.WriteStatusState(reader.reference("state"), reader.localId("field"), reader.target("target"),
+                    reader.statusFilter(), operation,
+                    if (operation == StatusStateOperation.SET) reader.stateInput("value") else null,
+                    if (operation == StatusStateOperation.ADD) reader.numeric("amount") else null, reader.resultName)
+            }, execute = { e, c -> c.writeStatusState(e) }),
+        EffectMechanic("archetype:launch_projectile", Effect.LaunchProjectile::class.java,
+            mapOf("projectile" to ref("projectile_call"), "direction" to mapOf<String, Any>("enum" to listOf("actor.aim", "actor.to_target", "actor.to_ground"))),
+            setOf("projectile"),
+            "Launches a bounded source-owned logical projectile from the actor. Native ray collisions choose the first eligible entity or solid block; cancellation produces no impact or expiry callback.",
+            setOf("launched", "handle"), projectileReferences = { listOf(it.projectile) },
+            numericInputs = { it.arguments.mapKeys { (name, _) -> "projectile.with.$name" } },
+            requiresTarget = { it.direction == ProjectileDirection.TARGET }, requiresEntityTarget = { it.direction == ProjectileDirection.TARGET },
+            requiresGround = { it.direction == ProjectileDirection.GROUND },
+            decode = { reader ->
+                val direction = when (reader.option("direction", setOf("actor.aim", "actor.to_target", "actor.to_ground"), "actor.aim")) {
+                    "actor.aim" -> ProjectileDirection.AIM
+                    "actor.to_target" -> ProjectileDirection.TARGET
+                    "actor.to_ground" -> ProjectileDirection.GROUND
+                    else -> error("invalid projectile direction")
+                }
+                val (projectile, arguments) = reader.referenceWith("projectile")
+                Effect.LaunchProjectile(projectile, direction, reader.resultName, arguments)
+            }, execute = { e, c -> c.launchProjectile(e) }),
+        EffectMechanic("archetype:wait_for", Effect.WaitFor::class.java,
+            mapOf("handle" to text, "event" to mapOf<String, Any>("enum" to listOf("projectile.entity_hit", "projectile.block_hit", "projectile.expiry")),
+                "timeout" to duration, "matched" to (body + ("minItems" to 0)), "timed_out" to (body + ("minItems" to 0))),
+            setOf("handle", "event", "timeout"),
+            "Registers one source-owned wait for a specific projectile handle and event. A bounded receipt catches an earlier outcome; natural timeout runs timed_out, while source cancellation runs neither body.",
+            children = { listOf(it.matched, it.timedOut) },
+            decode = { reader ->
+                val handle = reader.text("handle")
+                val event = when (reader.option("event", setOf("projectile.entity_hit", "projectile.block_hit", "projectile.expiry"), "projectile.entity_hit")) {
+                    "projectile.entity_hit" -> ProjectileEvent.ENTITY_HIT
+                    "projectile.block_hit" -> ProjectileEvent.BLOCK_HIT
+                    "projectile.expiry" -> ProjectileEvent.EXPIRY
+                    else -> error("invalid projectile event")
+                }
+                Effect.WaitFor(handle, event, reader.duration("timeout", positive = true), reader.effects("matched", false), reader.effects("timed_out", false))
+            }, execute = { e, c -> c.waitFor(e); null }),
+        EffectMechanic("archetype:set_state", Effect.SetState::class.java,
+            mapOf("state" to ref("reference"), "field" to timerName, "value" to stateValue), setOf("state", "field", "value"),
+            "Sets a declared player, class, or activation field. Numeric values clamp to its bounds; enum and Boolean values must match the declaration.",
+            setOf("previous", "current"), numericInputs = { (it.value as? StateInput.Number)?.let { input -> mapOf("value" to input.value) } ?: emptyMap() },
+            stateReferences = { listOf(it.state) },
+            decode = { Effect.SetState(it.reference("state"), it.localId("field"), it.stateInput("value"), it.resultName) },
+            execute = { e, c -> c.setState(e) }),
+        EffectMechanic("archetype:add_state", Effect.AddState::class.java,
+            mapOf("state" to ref("reference"), "field" to timerName, "amount" to numeric), setOf("state", "field", "amount"),
+            "Adds to a bounded numeric state field, clamping to its declared range.", setOf("previous", "current"),
+            numericInputs = { mapOf("amount" to it.amount) }, stateReferences = { listOf(it.state) },
+            decode = { Effect.AddState(it.reference("state"), it.localId("field"), it.numeric("amount"), it.resultName) },
+            execute = { e, c -> c.addState(e) }),
+        EffectMechanic("archetype:reset_state", Effect.ResetState::class.java,
+            mapOf("state" to ref("reference"), "field" to timerName), setOf("state", "field"),
+            "Resets a declared field to its initial value.", setOf("previous", "current"),
+            stateReferences = { listOf(it.state) },
+            decode = { Effect.ResetState(it.reference("state"), it.localId("field"), it.resultName) },
+            execute = { e, c -> c.resetState(e) }),
+        EffectMechanic("archetype:read_state", Effect.ReadState::class.java,
+            mapOf("state" to ref("reference"), "field" to timerName), setOf("state", "field"),
+            "Reads a declared numeric or Boolean field into a result. Boolean values are zero or one.", setOf("value"),
+            stateReferences = { listOf(it.state) },
+            decode = { Effect.ReadState(it.reference("state"), it.localId("field"), it.resultName) },
+            execute = { e, c -> c.readState(e) }),
         EffectMechanic("archetype:apply_status", Effect.ApplyStatus::class.java, mapOf("status" to ref("reference"), "target" to target), setOf("status", "target"), "Refreshes a stable source contribution without restarting its periodic cadence. Temporary presence remains owned by the source class.",
             statusReferences = { listOf(it.status) }, requiresTarget = { it.target == EffectTarget.TARGET },
             decode = { Effect.ApplyStatus(it.reference("status"), it.target("target"), it.identity) },
@@ -222,6 +370,17 @@ object BuiltinEffects {
             setOf("health", "maximum", "missing", "fraction"), requiresTarget = { it.target == EffectTarget.TARGET },
             decode = { Effect.ReadHealth(it.target("target"), it.resultName) },
             execute = { e, c -> c.readHealth(e.target) }),
+        EffectMechanic("archetype:shield", Effect.Shield::class.java,
+            mapOf("target" to target, "capacity" to numeric, "duration" to duration,
+                "priority" to integer(-100, 100), "damage_type" to text, "depleted" to (body + ("minItems" to 0))),
+            setOf("target", "capacity", "duration"),
+            "Creates a finite owned barrier. Matching damage consumes it after native armor, magic and absorption; priority descends, then creation order. The optional depleted body runs after the native hit commits, never on expiry or cancellation.",
+            setOf("capacity"), numericInputs = { mapOf("capacity" to it.capacity) }, children = { listOf(it.depleted) },
+            requiresTarget = { it.target == EffectTarget.TARGET },
+            decode = { Effect.Shield(it.target("target"), it.numeric("capacity"), it.duration("duration", positive = true),
+                it.integer("priority", -100, 100, 0), if (it.has("damage_type")) it.text("damage_type") else null,
+                it.effects("depleted", false), it.resultName) },
+            execute = { e, c -> c.shield(e) }),
         EffectMechanic("archetype:gain_resource", Effect.GainResource::class.java, mapOf("resource" to ref("reference"), "amount" to numeric), setOf("resource", "amount"), "Immediate clamped resource gain.", setOf("amount"),
             numericInputs = { mapOf("amount" to it.amount) }, resourceReferences = { listOf(it.resource) },
             decode = { Effect.GainResource(it.reference("resource"), it.numeric("amount"), it.resultName) },
@@ -262,6 +421,7 @@ object BuiltinEffects {
             } }.toMap() },
             resourceReferences = { branch -> branch.condition.leaves().filterIsInstance<Condition.ResourceAtLeast>().map { it.resource }.toList() },
             statusReferences = { branch -> branch.condition.leaves().filterIsInstance<Condition.HasStatus>().mapNotNull { it.filter.status }.toList() },
+            stateReferences = { branch -> branch.condition.leaves().filterIsInstance<Condition.StateIs>().map { it.state }.toList() },
             statusCreations = { emptyList() },
             requiresTarget = { branch -> branch.condition.leaves().filterIsInstance<Condition.HasStatus>().any { it.target == EffectTarget.TARGET } },
             decode = { Effect.Branch(it.condition("when"), it.effects("then"), it.effects("else", false)) },

@@ -1,0 +1,17 @@
+kind: ability
+id: parallel_ritual
+name: Parallel ritual fixture
+effects:
+  - type: parallel
+    join: all
+    branches:
+      - effects:
+          - {type: gain_resource, resource: focus, amount: 1}
+      - after: 100ms
+        effects:
+          - {type: gain_resource, resource: focus, amount: 1}
+        success_when: {type: resource_at_least, resource: focus, amount: 1}
+    then:
+      - {type: heal, target: actor, amount: {expr: 'parallel.completed'}}
+    failed:
+      - {type: heal, target: actor, amount: 1}

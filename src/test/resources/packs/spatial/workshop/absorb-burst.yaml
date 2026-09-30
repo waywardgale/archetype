@@ -1,0 +1,14 @@
+kind: ability
+id: absorb_burst
+name: Absorb and burst
+effects:
+  - type: shield
+    target: actor
+    capacity: 20
+    duration: 6s
+    priority: 10
+    damage_type: minecraft:magic
+    depleted:
+      - type: gain_resource
+        resource: focus
+        amount: 10

@@ -1,0 +1,6 @@
+kind: ability
+id: passive_focus
+name: Passive focus
+activation: {type: passive}
+effects:
+  - {type: gain_resource, resource: focus, amount: 1}

@@ -1,0 +1,6 @@
+kind: ability
+id: maintained_passive
+name: Maintained aura
+activation: {type: passive}
+effects:
+  - {type: create_area, area: maintained_field, anchor: {attached: actor}}

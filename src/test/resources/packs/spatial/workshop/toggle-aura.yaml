@@ -1,0 +1,6 @@
+kind: ability
+id: toggle_aura
+name: Toggle aura fixture
+activation: {type: toggle}
+effects:
+  - {type: create_area, area: maintained_field, anchor: {attached: actor}}

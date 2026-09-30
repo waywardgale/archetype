@@ -1,0 +1,5 @@
+kind: ability
+id: apply_fragile_mark
+name: Fragile mark
+effects:
+  - {type: apply_status, id: fragile_application, status: fragile_mark, target: target}

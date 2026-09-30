@@ -67,7 +67,7 @@ sealed interface Shape {
 }
 
 enum class Relation { ANY, ALLY, ENEMY, SELF }
-enum class TargetOrder { NEAREST, LOWEST_HEALTH, HIGHEST_HEALTH }
+enum class TargetOrder { NEAREST, FARTHEST, LOWEST_HEALTH, HIGHEST_HEALTH, RANDOM }
 data class Selector(
     val shape: Shape,
     val limit: Int = 16,

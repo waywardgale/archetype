@@ -1,10 +1,13 @@
 package dev.archetype.minecraft
 
 import dev.archetype.runtime.WorldOps
+import dev.archetype.runtime.ProjectileContact
+import dev.archetype.definitions.ProjectileEntities
 import dev.archetype.definitions.EntityView
 import dev.archetype.definitions.Position
 import dev.archetype.definitions.Vec
 import net.minecraft.core.BlockPos
+import net.minecraft.core.particles.ParticleTypes
 import net.minecraft.core.registries.Registries
 import net.minecraft.resources.Identifier
 import net.minecraft.resources.ResourceKey
@@ -56,6 +59,44 @@ class MinecraftWorldOps(private val server: MinecraftServer) : WorldOps {
     }
 
     override fun direction(entity: UUID): Vec = entity(entity)?.lookAngle?.vector() ?: Vec(0.0, 0.0, 1.0)
+
+    override fun projectileOrigin(actor: UUID): Position? = server.playerList.getPlayer(actor)?.let { player ->
+        Position(player.level().dimension().identifier().toString(), player.eyePosition.vector())
+    }
+
+    override fun projectileStep(actor: UUID, from: Position, to: Position, entities: ProjectileEntities, excluded: Set<UUID>): ProjectileContact {
+        val player = server.playerList.getPlayer(actor) ?: return ProjectileContact.Unavailable
+        val level = level(from) ?: return ProjectileContact.Unavailable
+        if (from.dimension != to.dimension || player.level() != level || !player.isAlive) return ProjectileContact.Unavailable
+        val start = Vec3(from.value.x, from.value.y, from.value.z)
+        val end = Vec3(to.value.x, to.value.y, to.value.z)
+        if (!loadedPath(level, start, end)) return ProjectileContact.Unavailable
+        val block = level.clip(ClipContext(start, end, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player))
+        val stop = if (block.type == HitResult.Type.BLOCK) block.location else end
+        val found = mutableListOf<LivingEntity>()
+        level.getEntities(EntityTypeTest.forClass(LivingEntity::class.java), AABB(start, stop).inflate(1.0),
+            { entity -> entity.isAlive && entity.uuid != actor && entity.uuid !in excluded && when (entities) {
+                ProjectileEntities.ENEMIES -> !view(player, entity).ally
+                ProjectileEntities.ALLIES -> view(player, entity).ally
+                ProjectileEntities.ANY -> true
+            } }, found, 513)
+        if (found.size > 512) return ProjectileContact.Unavailable
+        val entityHit = found.mapNotNull { entity ->
+            val box = entity.boundingBox.inflate(ProjectileUtil.computeMargin(entity).toDouble())
+            val point = if (box.contains(start)) start else box.clip(start, stop).orElse(null) ?: return@mapNotNull null
+            Triple(entity.uuid, point, start.distanceToSqr(point))
+        }.sortedWith(compareBy<Triple<UUID, Vec3, Double>> { it.third }.thenBy { it.first.toString() }).firstOrNull()
+        if (entityHit != null) return ProjectileContact.Entity(entityHit.first, Position(from.dimension, entityHit.second.vector()))
+        if (block.type == HitResult.Type.BLOCK) return ProjectileContact.Block(Position(from.dimension, block.location.vector()),
+            Vec(block.direction.stepX.toDouble(), block.direction.stepY.toDouble(), block.direction.stepZ.toDouble()))
+        return ProjectileContact.Miss(to)
+    }
+
+    override fun projectileVisible(position: Position) {
+        val level = level(position) ?: return
+        val p = position.value
+        level.sendParticles(ParticleTypes.CRIT, p.x, p.y, p.z, 1, 0.0, 0.0, 0.0, 0.0)
+    }
 
     private fun level(position: Position) = server.allLevels.firstOrNull { it.dimension().identifier().toString() == position.dimension }
 
@@ -110,6 +151,20 @@ class MinecraftWorldOps(private val server: MinecraftServer) : WorldOps {
         val player = server.playerList.getPlayer(actor) ?: return null
         val entity = entity(target) ?: return null
         return view(player, entity)
+    }
+
+    override fun nearbyAlliedPlayers(actor: UUID, origin: Position, radius: Double, limit: Int): List<UUID> {
+        val owner = server.playerList.getPlayer(actor) ?: return emptyList()
+        if (radius !in 0.1..64.0 || limit !in 1..128 || origin.dimension != owner.level().dimension().identifier().toString())
+            return emptyList()
+        val radiusSquared = radius * radius
+        return server.playerList.players.asSequence().filter { candidate ->
+            candidate.isAlive && candidate.level() == owner.level() &&
+                (candidate.uuid == actor || owner.isAlliedTo(candidate)) &&
+                (candidate.x - origin.value.x) * (candidate.x - origin.value.x) +
+                    (candidate.y - origin.value.y) * (candidate.y - origin.value.y) +
+                    (candidate.z - origin.value.z) * (candidate.z - origin.value.z) <= radiusSquared
+        }.map { it.uuid }.sortedBy(UUID::toString).take(limit).toList()
     }
 
     private fun view(player: ServerPlayer, entity: LivingEntity) = EntityView(

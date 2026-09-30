@@ -1,0 +1,5 @@
+kind: ability
+id: alternate_attack
+name: Alternate attack fixture
+effects:
+  - {type: heal, target: actor, amount: 2}

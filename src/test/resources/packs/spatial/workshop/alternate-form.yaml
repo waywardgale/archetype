@@ -1,0 +1,5 @@
+kind: status
+id: alternate_form
+duration: 2s
+modifiers:
+  - {type: replace, target: {ability: form_attack}, replacement: {ref: alternate_attack}, priority: 10}

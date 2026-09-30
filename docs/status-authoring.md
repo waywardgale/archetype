@@ -1,6 +1,8 @@
 # Statuses and membership buffs in the current build
 
-Statuses support timed source contributions, capped stacks, periodic work, lifecycle callbacks, an additive native movement speed bonus, tags, presence conditions, bounded dispels, activation restrictions, and control-category immunity. This is part of the accepted v1 contract. Movement, jump, and attack restrictions, break-on-damage rules, status-local state, other attributes, complete ability replacements, and client status feedback remain required.
+Statuses support timed source contributions, capped stacks, periodic work, lifecycle callbacks, an additive native movement speed bonus, status-owned complete ability replacements, tags, presence conditions, bounded dispels, activation restrictions, control-category immunity, health-loss break rules, per-contribution state inside callbacks, and filtered external reads and writes. This is part of the accepted v1 contract. Movement, jump, and attack restrictions, other attributes, additional modifier types, and client status feedback remain required.
+
+A status can attach a `scope: status` state definition with `state: {ref: memory}`. Its applied, refresh, periodic, expiry, and break callbacks share one transient field map per source contribution. Refresh keeps those fields; source removal frees them. See [state authoring](state-authoring.md) for field grammar and the `memory_mark` fixture for a per-source pulse counter.
 
 ## Timed application
 
@@ -79,7 +81,9 @@ Overlapping areas remain separate even when they come from repeated casts of the
 
 A status may declare `tags: [harmful, fire]`. Tags are labels, with no built-in polarity or immunity behavior. Local labels gain the pack namespace, so these become `workshop:harmful` and `workshop:fire` in the workshop pack. Namespaced labels use the same declared dependency checks as references. A supplied list must contain 1..16 distinct labels. Labels need no separate definitions.
 
-`restrictions: [activate]` blocks new ability activations on the status recipient. The server checks active contributions before charging resources, consuming charges, or starting cooldowns. Overlapping restrictions remain until every contributing source ends. The current build supports only `activate`; movement, jump, attack restrictions, and break-on-damage behavior remain unimplemented.
+`restrictions: [activate]` blocks new ability activations on the status recipient. The server checks active contributions before charging resources, consuming charges, or starting cooldowns. Overlapping restrictions remain until every contributing source ends. The current build supports only `activate`; movement, jump, and attack restrictions remain unimplemented.
+
+`break_on_damage: {minimum_health_loss: 1}` removes a source contribution after a native hit actually lowers its recipient's health by at least the declared amount. The default threshold is zero, but a hit must still cause positive health loss. Armor, vanilla absorption, framework barriers, invulnerability, and cancelled hits do not count as health loss. Each matching contribution breaks once; an optional `broken` effect list runs after removal with the original `status.stacks` binding. Ordinary expiry and source cancellation do not run `broken`. The native outcome bridge compiles and deterministic tests cover this ordering, but running-world behavior still needs verification.
 
 Control categories and immunity are explicit labels. They use the same local/namespaced spelling, dependency rules, and 1..16 distinct-label limit as tags, but tags alone confer no control behavior:
 
@@ -153,6 +157,20 @@ Removal cancels that contribution's periodic and delayed work, chains, and desce
 Dispelling an area membership buff leaves the area and its membership active. Sampling does not recreate that buff during the same membership. Leaving and reentering applies a fresh contribution. A status can inspect or dispel itself; self-removal stops the rest of that status callback while the enclosing ability can continue.
 
 Named status reads participate in reference validation and affected-reload cleanup. They do not create controllers or reserve their callbacks' work. A status reading or dispelling itself is valid; recursive status or area creation still fails validation. Registered effects use `statusReferences` for all named dependencies and `statusCreations` for creation edges. The latter defaults to the former for creation mechanics; query mechanics explicitly declare no creation edges.
+
+`write_status_state` updates a declared field on each matching live contribution attached to that status state. Its `operation` is `set` with a typed `value`, `add` with a numeric `amount`, or `reset` to the field's initial value. The ordinary status filter selects the exact owners and sources; `source: actor` keeps two players' marks separate. Numeric writes clamp to declared bounds. The result reports `contributions` changed and, for numeric or Boolean fields, the sums `previous` and `current`. A missing target supplies no result. A valid recipient with no matches reports zero contributions. Only a status-scoped state attached to at least one status can be targeted.
+
+```yaml
+- type: write_status_state
+  state: mark_memory
+  field: hits
+  target: target
+  status: mark
+  source: actor
+  operation: add
+  amount: 1
+  as: updated
+```
 
 ## Bounds and verification
 

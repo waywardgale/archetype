@@ -12,10 +12,24 @@ class TargetSelection(private val world: WorldOps) {
         require(candidates.size <= 512) { "target query exceeds 512 candidates" }
         charge(candidates.size + 1)
         val eligible = candidates.asSequence().distinctBy { it.id }.filter { it.id !in excluded && matches(actor, frame, selector, it) }
+        if (selector.order == TargetOrder.RANDOM) {
+            val shuffled = eligible.sortedBy { it.id.toString() }.toMutableList()
+            for (index in shuffled.lastIndex downTo 1) {
+                val sample = world.roll(actor)
+                require(sample.isFinite() && sample >= 0.0 && sample < 1.0) { "invalid random target sample" }
+                val other = minOf((sample * (index + 1)).toInt(), index)
+                val swap = shuffled[index]
+                shuffled[index] = shuffled[other]
+                shuffled[other] = swap
+            }
+            return shuffled.take(selector.limit).map { it.id }
+        }
         val ordered = when (selector.order) {
             TargetOrder.NEAREST -> compareBy<EntityView> { (it.position.value - frame.position.value).lengthSquared() }
+            TargetOrder.FARTHEST -> compareByDescending { (it.position.value - frame.position.value).lengthSquared() }
             TargetOrder.LOWEST_HEALTH -> compareBy { it.health / it.maximumHealth }
             TargetOrder.HIGHEST_HEALTH -> compareByDescending { it.health / it.maximumHealth }
+            TargetOrder.RANDOM -> error("random selection is handled above")
         }.thenBy { it.id.toString() }
         return eligible.sortedWith(ordered).take(selector.limit).map { it.id }.toList()
     }

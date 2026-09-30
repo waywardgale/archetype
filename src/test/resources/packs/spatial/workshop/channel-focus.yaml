@@ -1,0 +1,10 @@
+kind: ability
+id: channel_focus
+name: Channel focus fixture
+activation:
+  type: channel
+  every: 100ms
+  max_duration: 4s
+  periodic_costs: [{resource: focus, amount: 1}]
+effects:
+  - {type: heal, target: actor, amount: 1}

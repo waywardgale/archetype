@@ -1,0 +1,13 @@
+kind: unlock_tree
+id: practice_tree
+track: practice
+nodes:
+  alternate:
+    selection: talent
+    requires: {type: level_at_least, track: practice, level: 2}
+    cost: {budget: talents, amount: 1}
+    grants: [{type: empowerment, ref: form_talent}]
+  learned_confirm:
+    selection: automatic
+    requires: {type: level_at_least, track: practice, level: 2}
+    grants: [{type: ability, grant: learned_confirm, ref: confirm_strike, slot: learned_confirm}]

@@ -1,0 +1,10 @@
+kind: ability
+id: memory_detonate
+name: Memory detonate fixture
+effects:
+  - {type: read_status_state, state: mark_memory, field: pulses, target: target, status: memory_mark, source: actor, as: memory}
+  - {type: consume_status, target: target, status: memory_mark, source: actor, count: 1, as: removed}
+  - type: branch
+    when: {type: compare, left: {expr: "result.removed.contributions_removed"}, op: gt, right: 0}
+    then:
+      - {type: damage, target: target, amount: {expr: "result.memory.value"}, damage_type: minecraft:magic}

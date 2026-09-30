@@ -1,0 +1,4 @@
+kind: empowerment
+id: form_talent
+changes:
+  - {type: replace, target: {ability: form_attack}, replacement: {ref: alternate_attack}, priority: 20}

@@ -1,0 +1,15 @@
+kind: progression_track
+id: practice
+scope: class
+levels:
+  - level: 1
+    xp: 0
+    awards:
+      - {id: starter_point, type: talent_points, budget: talents, amount: 1}
+  - level: 2
+    xp: 100
+    awards:
+      - {id: second_point, type: talent_points, budget: talents, amount: 1}
+cap: {level: 2, overflow: bank}
+earn:
+  credited_defeat: {event: entity_death, xp: 10}

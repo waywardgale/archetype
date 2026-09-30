@@ -1,0 +1,13 @@
+kind: area
+id: maintained_field
+shape: {type: sphere, radius: 3}
+lifetime: maintained
+sample_every: 100ms
+targets:
+  type: living_entities
+  include_actor: true
+  filters: [{type: relation, is: self}]
+buffs: [{ref: field_haste}]
+periodic:
+  every: 1s
+  effects: [{type: heal, target: target, amount: 1}]

@@ -1,0 +1,6 @@
+kind: ability
+id: charged_heal
+name: Charged heal fixture
+activation: {type: charge, min_hold: 100ms, max_hold: 1s}
+effects:
+  - {type: heal, target: actor, amount: {expr: 'charge.held_ticks * 0.25'}}

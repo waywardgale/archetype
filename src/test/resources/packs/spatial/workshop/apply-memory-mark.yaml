@@ -1,0 +1,5 @@
+kind: ability
+id: apply_memory_mark
+name: Apply memory mark fixture
+effects:
+  - {type: apply_status, id: memory_mark_application, status: memory_mark, target: target}
