@@ -13,5 +13,8 @@ Run `./gradlew validatePacks -Ppacks=/absolute/path/to/world/archetype/packs` to
 Run `./gradlew exportCatalog` for the supported editor schema and effect reference in `build/catalog/`. [Spatial authoring](docs/spatial-authoring.md) documents shaped selections, chains, fixed fields, and attached areas. [Status authoring](docs/status-authoring.md) documents timed contributions, stacks, periodic effects, area membership buffs, tags, presence conditions, and dispels. Validate the optional fixture pack with `./gradlew validatePacks -Ppacks=src/test/resources/packs/spatial`; it is not installed into worlds automatically.
 
 The client uses B to cycle classes and R for the first ability grant. Seven more ability keys are available in Controls and start unbound. The current HUD shows the active class, grants, cooldowns, and resource amounts.
+The current build also shows grant charges and their next recharge. [Timers and charges](docs/timers-and-charges.md) documents the supported manifest fields and source cleanup rules.
+[Flow authoring](docs/flow-authoring.md) covers bounded condition composition and weighted choices.
+[Resource authoring](docs/resource-authoring.md) covers balance edits and reset behavior.
 
 This build supports a limited set of definitions and mechanics. Packs using the remaining accepted v1 features fail validation with a located diagnostic; the compiler does not silently ignore them.

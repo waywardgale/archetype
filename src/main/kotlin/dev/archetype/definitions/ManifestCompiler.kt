@@ -109,6 +109,29 @@ class ManifestCompiler(private val catalog: MechanicCatalog = BuiltinEffects.cat
         }
         val bodies = abilities.mapValues { it.value.effects } + classes.values.flatMap { it.grants.values }.associate { it.ability.id to it.ability.effects } +
             areas.mapValues { (_, area) -> area.enter + area.periodic + area.exit + area.expired } + statuses.mapValues { it.value.bodies }
+        val declaredGroups = (abilities.values + classes.values.flatMap { it.grants.values.map(Grant::ability) }).flatMap { it.cooldownGroups }.toSet()
+        for ((id, effects) in bodies) for (effect in effects.flatMap { catalog.descendants(it).toList() }) {
+            if (effect is Effect.ReduceGroupCooldown && effect.group !in declaredGroups)
+                errors += Diagnostic(id, "effects.group", "unknown cooldown group ${effect.group}")
+        }
+        for ((classId, classDef) in classes) for ((grantName, grant) in classDef.grants) {
+            // ASVS 2.2.2, 2.2.3: resolve named grant edits against each actual granting class, including controller callbacks.
+            val visited = mutableSetOf<String>()
+            val reported = mutableSetOf<String>()
+            fun visit(effects: List<Effect>) {
+                for (effect in effects.flatMap { catalog.descendants(it).toList() }) {
+                    val mechanic = catalog.mechanic(effect)
+                    for (ref in mechanic.grants(effect)) if (ref != "self" && ref !in classDef.grants && reported.add(ref))
+                        errors += Diagnostic("$classId/$grantName", "effects.grant", "unknown logical grant $ref")
+                    for (ref in mechanic.areas(effect)) if (visited.add("area:$ref")) areas[ref]?.let { area ->
+                        visit(area.enter + area.periodic + area.exit + area.expired)
+                        area.buffs.forEach { buff -> if (visited.add("status:$buff")) statuses[buff]?.let { visit(it.bodies) } }
+                    }
+                    for (ref in mechanic.createdStatuses(effect)) if (visited.add("status:$ref")) statuses[ref]?.let { visit(it.bodies) }
+                }
+            }
+            visit(grant.ability.effects)
+        }
         for ((id, area) in areas) for (status in area.buffs) if (status !in statuses) errors += Diagnostic(id, "buffs", "unknown status $status")
         for ((id, effects) in bodies) for (effect in effects.flatMap { catalog.descendants(it).toList() }) {
             val mechanic = catalog.mechanic(effect)
@@ -178,7 +201,7 @@ class ManifestCompiler(private val catalog: MechanicCatalog = BuiltinEffects.cat
     }
 
     private fun parseAbility(m: Map<String, Any?>, id: String, global: Boolean, pack: Pack): AbilityDef {
-        val allowed = setOf("name", "description", "activation", "cooldown", "costs", "effects", "icon", "target") + if (global) setOf("kind", "id") else emptySet()
+        val allowed = setOf("name", "description", "activation", "cooldown", "charges", "costs", "effects", "icon", "target") + if (global) setOf("kind", "id") else emptySet()
         m.only(allowed, "$" )
         for (field in listOf("description", "icon")) if (field in m) m.string(field, "$")
         val activation = when (val mode = m["activation"]) {
@@ -194,7 +217,41 @@ class ManifestCompiler(private val catalog: MechanicCatalog = BuiltinEffects.cat
             }
             else -> bad("activation", "expected a mapping")
         }
-        val cooldown = m["cooldown"]?.asString("cooldown")?.let { ticks(it, "cooldown") } ?: 0
+        var cooldown = 0
+        var cooldownGroups: Set<String> = emptySet()
+        var globalCooldown = 0
+        // ASVS 2.2.1, 2.2.3: timing modes and group combinations are checked before publication.
+        when (val timing = m["cooldown"]) {
+            null -> Unit
+            is String -> cooldown = ticks(timing, "cooldown")
+            is Map<*, *> -> {
+                val settings = timing.asMap("cooldown", "cooldown")
+                settings.only(setOf("duration", "groups", "global"), "cooldown")
+                cooldown = ticks(settings.string("duration", "cooldown"), "cooldown.duration")
+                val raw = settings.listOrEmpty("groups", "cooldown")
+                if (raw.size > 8) bad("cooldown.groups", "at most 8 shared cooldown groups are supported")
+                val groups = raw.mapIndexed { index, value -> qualify(value.asString("cooldown.groups[$index]"), pack.id, pack, "cooldown.groups[$index]") }
+                if (groups.distinct().size != groups.size) bad("cooldown.groups", "duplicate cooldown group")
+                cooldownGroups = groups.toSet()
+                globalCooldown = settings["global"]?.asString("cooldown.global")?.let { ticks(it, "cooldown.global") } ?: 0
+                if ((cooldownGroups.isNotEmpty() || globalCooldown > 0) && cooldown <= 0) bad("cooldown.duration", "shared cooldown requires a positive ability duration")
+            }
+            else -> bad("cooldown", "expected a duration or timing mapping")
+        }
+        val charges = m["charges"]?.asMap("charges", "charges")?.let { settings ->
+            // ASVS 2.2.1, 2.3.2: finite capacity and positive recharge bound future work.
+            settings.only(setOf("max", "recharge", "mode"), "charges")
+            val maximum = settings.integer("max", "charges")
+            if (maximum !in 1..16) bad("charges.max", "charge capacity must be 1..16")
+            val recharge = ticks(settings.string("recharge", "charges"), "charges.recharge")
+            if (recharge <= 0) bad("charges.recharge", "recharge interval must be positive")
+            val mode = when (settings["mode"] ?: "sequential") {
+                "sequential" -> RechargeMode.SEQUENTIAL
+                "parallel" -> RechargeMode.PARALLEL
+                else -> bad("charges.mode", "supported recharge modes are sequential and parallel")
+            }
+            ChargeDef(maximum, recharge, mode)
+        }
         val rawCosts = m.listOrEmpty("costs", "$")
         if (rawCosts.size > 128) bad("costs", "at most 128 costs are supported")
         val costs = rawCosts.mapIndexed { index, value ->
@@ -227,7 +284,7 @@ class ManifestCompiler(private val catalog: MechanicCatalog = BuiltinEffects.cat
         } ?: Targeting()
         if (targeting.type != Targeting.Type.GROUND && effects.any { requiresGround(it) }) bad("target", "ground positions require target.type: ground")
         validateContexts(effects, targeting.type == Targeting.Type.ENTITY, targeting.type == Targeting.Type.GROUND, "effects")
-        return AbilityDef(id, m.string("name", "$"), activation, cooldown, costs, effects, targeting)
+        return AbilityDef(id, m.string("name", "$"), activation, cooldown, costs, effects, targeting, charges, cooldownGroups, globalCooldown)
     }
 
     private fun requiresGround(effect: Effect): Boolean = catalog.mechanic(effect).let { mechanic ->
@@ -264,7 +321,7 @@ class ManifestCompiler(private val catalog: MechanicCatalog = BuiltinEffects.cat
     }
 
     private fun parseStatus(m: Map<String, Any?>, id: String, pack: Pack): StatusDef {
-        m.only(setOf("kind", "id", "duration", "reapply", "stacks", "periodic", "applied", "refreshed", "stacks_changed", "expired", "modifiers", "tags"), "$")
+        m.only(setOf("kind", "id", "duration", "reapply", "stacks", "periodic", "applied", "refreshed", "stacks_changed", "expired", "modifiers", "tags", "restrictions", "control_categories", "immunities"), "$")
         val duration = ticks(m.string("duration", "$"), "duration")
         if (duration <= 0) bad("duration", "status lifetime must be positive")
         if (m["reapply"] != null && m.string("reapply", "$") != "refresh") bad("reapply", "supported reapplication policy is refresh")
@@ -308,7 +365,16 @@ class ManifestCompiler(private val catalog: MechanicCatalog = BuiltinEffects.cat
             if (cap != null && amount > cap) bad("$field.amount", "bonus exceeds its addition cap")
             SpeedBonus(amount, combination, cap)
         }
-        return StatusDef(id, duration, stacks, interval, periodic, callbacks.getValue("applied"), callbacks.getValue("refreshed"), callbacks.getValue("stacks_changed"), callbacks.getValue("expired"), speed, statusTags(m, pack, "$"))
+        val restrictions = m.listOrEmpty("restrictions", "$")
+        if (restrictions.size > 1) bad("restrictions", "only one activation restriction is supported")
+        val actions = restrictions.mapIndexed { index, value ->
+            if (value.asString("restrictions[$index]") != "activate") bad("restrictions[$index]", "supported restriction is activate")
+            ActionRestriction.ACTIVATE
+        }.toSet()
+        val controlCategories = statusLabels(m, "control_categories", pack, "$")
+        val immunities = statusLabels(m, "immunities", pack, "$")
+        if (controlCategories.any { it in immunities }) bad("immunities", "a status cannot be immune to its own control category")
+        return StatusDef(id, duration, stacks, interval, periodic, callbacks.getValue("applied"), callbacks.getValue("refreshed"), callbacks.getValue("stacks_changed"), callbacks.getValue("expired"), speed, statusTags(m, pack, "$"), actions, controlCategories, immunities)
     }
 
     private fun validateContexts(effects: List<Effect>, entity: Boolean, position: Boolean, field: String) {
@@ -334,6 +400,12 @@ class ManifestCompiler(private val catalog: MechanicCatalog = BuiltinEffects.cat
                     val whenFalse = validateBindings(effect.onFalse, available, "$location.else")
                     available += whenTrue.intersect(whenFalse)
                 }
+                is Effect.Choose -> {
+                    val common = effect.options.mapIndexed { option, branch -> validateBindings(branch.effects, available, "$location.options[$option].effects") }
+                        .reduce(Set<String>::intersect)
+                    available += common
+                }
+                is Effect.Sequence -> available += validateBindings(effect.effects, available, "$location.effects")
                 else -> for (body in mechanic.nested(effect)) validateBindings(body, available + mechanic.localBindings, "$location.effects")
             }
             effect.resultName?.let { name ->
@@ -363,7 +435,23 @@ class ManifestCompiler(private val catalog: MechanicCatalog = BuiltinEffects.cat
         return mechanic.decode(object : EffectReader {
             override val resultName = name
             override val identity = identity
+            override fun has(key: String) = key in m
             override fun text(key: String) = m.string(key, field)
+            override fun localId(key: String): String {
+                val value = text(key)
+                if (value.length > 64 || !LOCAL_ID.matches(value)) bad("$field.$key", "expected a local name of at most 64 characters")
+                return value
+            }
+            override fun grant(key: String): String {
+                val value = text(key)
+                if (value.length > 128 || !LOCAL_ID.matches(value)) bad("$field.$key", "expected a local grant name of at most 128 characters")
+                return value
+            }
+            override fun option(key: String, choices: Set<String>, default: String): String {
+                val value = if (key in m) text(key) else default
+                if (value !in choices) bad("$field.$key", "supported values are ${choices.joinToString()}")
+                return value
+            }
             override fun integer(key: String, min: Int, max: Int, default: Int?): Int {
                 val value = if (key !in m && default != null) default else m.integer(key, field)
                 if (value !in min..max) bad("$field.$key", "must be $min..$max")
@@ -383,6 +471,20 @@ class ManifestCompiler(private val catalog: MechanicCatalog = BuiltinEffects.cat
             override fun target(key: String) = parseTarget(text(key), "$field.$key")
             override fun spatialTarget(key: String, default: SpatialTarget) = if (key !in m) default else parseSpatial(text(key), "$field.$key")
             override fun effects(key: String, required: Boolean) = nestedEffects(m, key, field, pack, depth, required)
+            override fun choices(key: String): List<WeightedBranch> {
+                val values = m.listOrEmpty(key, field)
+                if (values.size !in 1..16) bad("$field.$key", "choice list must contain 1..16 branches")
+                val branches = values.mapIndexed { index, value ->
+                    val path = "$field.$key[$index]"
+                    val option = value.asMap(path, path)
+                    option.only(setOf("weight", "effects"), path)
+                    val weight = option.integer("weight", path)
+                    if (weight !in 1..1000) bad("$path.weight", "weight must be 1..1000")
+                    WeightedBranch(weight, nestedEffects(option, "effects", path, pack, depth))
+                }
+                if (branches.sumOf(WeightedBranch::weight) > 10_000) bad("$field.$key", "total choice weight exceeds 10000")
+                return branches
+            }
             override fun condition(key: String) = parseCondition(m[key].asMap("$field.$key", "$field.$key"), "$field.$key", pack)
             override fun statusFilter() = parseStatusFilter(m, pack, field)
             override fun selector(key: String, shape: Shape?) = parseSelector(m[key].asMap("$field.$key", "$field.$key"), "$field.$key", shape)
@@ -509,34 +611,61 @@ class ManifestCompiler(private val catalog: MechanicCatalog = BuiltinEffects.cat
         }
     }
 
-    private fun parseCondition(m: Map<String, Any?>, field: String, pack: Pack): Condition = when (m.string("type", field)) {
-        "has_status" -> {
-            m.only(setOf("type", "target", "status", "tags", "source"), field)
-            Condition.HasStatus(parseTarget(m.string("target", field), "$field.target"), parseStatusFilter(m, pack, field))
+    private fun parseCondition(m: Map<String, Any?>, field: String, pack: Pack, depth: Int = 0, nodes: IntArray = intArrayOf(0)): Condition {
+        // ASVS 2.2.1, 2.3.2: finite Boolean trees cannot multiply evaluation work without bound.
+        if (depth > 8 || ++nodes[0] > 128) bad(field, "condition tree exceeds its depth or node limit")
+        fun children(key: String): List<Condition> {
+            m.only(setOf(key), field)
+            val values = m.listOrEmpty(key, field)
+            if (values.size !in 1..16) bad("$field.$key", "condition list must contain 1..16 entries")
+            return values.mapIndexed { index, value ->
+                val path = "$field.$key[$index]"
+                parseCondition(value.asMap(path, path), path, pack, depth + 1, nodes)
+            }
         }
-        "resource_at_least" -> {
-            m.only(setOf("type", "resource", "amount"), field)
-            Condition.ResourceAtLeast(qualify(m.string("resource", field), pack.id, pack, "$field.resource"), numeric(m["amount"], "$field.amount"))
+        return when {
+            "all" in m -> Condition.All(children("all"))
+            "any" in m -> Condition.Any(children("any"))
+            "not" in m -> {
+                m.only(setOf("not"), field)
+                Condition.Not(parseCondition(m["not"].asMap("$field.not", "$field.not"), "$field.not", pack, depth + 1, nodes))
+            }
+            else -> when (m.string("type", field)) {
+                "has_status" -> {
+                    m.only(setOf("type", "target", "status", "tags", "source"), field)
+                    Condition.HasStatus(parseTarget(m.string("target", field), "$field.target"), parseStatusFilter(m, pack, field))
+                }
+                "resource_at_least" -> {
+                    m.only(setOf("type", "resource", "amount"), field)
+                    Condition.ResourceAtLeast(qualify(m.string("resource", field), pack.id, pack, "$field.resource"), numeric(m["amount"], "$field.amount"))
+                }
+                "compare" -> {
+                    m.only(setOf("type", "left", "op", "right"), field)
+                    val operator = m.string("op", field)
+                    if (operator !in setOf("lt", "lte", "eq", "gte", "gt")) bad("$field.op", "unsupported comparison")
+                    Condition.Compare(numeric(m["left"], "$field.left"), operator, numeric(m["right"], "$field.right"))
+                }
+                "chance" -> {
+                    m.only(setOf("type", "probability"), field)
+                    Condition.Chance(boundedNumber(m, "probability", field, 0.0, 1.0))
+                }
+                else -> bad("$field.type", "unsupported condition type")
+            }
         }
-        "compare" -> {
-            m.only(setOf("type", "left", "op", "right"), field)
-            val operator = m.string("op", field)
-            if (operator !in setOf("lt", "lte", "eq", "gte", "gt")) bad("$field.op", "unsupported comparison")
-            Condition.Compare(numeric(m["left"], "$field.left"), operator, numeric(m["right"], "$field.right"))
-        }
-        else -> bad("$field.type", "unsupported condition type")
     }
 
-    private fun statusTags(m: Map<String, Any?>, pack: Pack, field: String): Set<String> {
-        if ("tags" !in m) return emptySet()
-        val location = if (field == "$") "tags" else "$field.tags"
-        val raw = m.listOrEmpty("tags", field)
+    private fun statusLabels(m: Map<String, Any?>, name: String, pack: Pack, field: String): Set<String> {
+        if (name !in m) return emptySet()
+        val location = if (field == "$") name else "$field.$name"
+        val raw = m.listOrEmpty(name, field)
         // ASVS 2.2.1, 2.2.3: bounded labels share namespace validation and reject normalized duplicates.
-        if (raw.size !in 1..16) bad(location, "tags must contain 1..16 distinct namespaced or local labels")
+        if (raw.size !in 1..16) bad(location, "$name must contain 1..16 distinct namespaced or local labels")
         val tags = raw.mapIndexed { index, value -> qualify(value.asString("$location[$index]"), pack.id, pack, "$location[$index]") }
-        if (tags.distinct().size != tags.size) bad(location, "duplicate status tag")
+        if (tags.distinct().size != tags.size) bad(location, "duplicate $name label")
         return tags.toSet()
     }
+
+    private fun statusTags(m: Map<String, Any?>, pack: Pack, field: String) = statusLabels(m, "tags", pack, field)
 
     private fun parseStatusFilter(m: Map<String, Any?>, pack: Pack, field: String): StatusFilter {
         val source = when (if ("source" in m) m["source"] else "any") {

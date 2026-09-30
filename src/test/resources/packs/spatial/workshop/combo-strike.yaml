@@ -1,0 +1,49 @@
+kind: ability
+id: combo_strike
+name: Three-step combo fixture
+target: {type: entity, range: 16}
+effects:
+  - type: damage
+    target: target
+    amount: 1
+    damage_type: minecraft:magic
+    as: strike
+  - type: branch
+    when: {type: compare, left: {expr: 'result.strike.health_lost'}, op: gt, right: 0}
+    then:
+      - type: read_status
+        target: actor
+        status: combo_mark
+        source: grant
+        as: combo
+      - type: branch
+        when: {type: compare, left: {expr: 'result.combo.stacks'}, op: gte, right: 2}
+        then:
+          - type: consume_status
+            target: actor
+            status: combo_mark
+            source: grant
+            count: 2
+            as: used
+          - type: cancel_timer
+            name: combo_window
+            target: actor
+          - type: damage
+            target: target
+            amount: {expr: 'result.used.stacks_removed * 5'}
+            damage_type: minecraft:magic
+        else:
+          - type: apply_status
+            id: combo_application
+            status: combo_mark
+            target: actor
+          - type: set_timer
+            name: combo_window
+            target: actor
+            duration: 100ms
+            expired:
+              - type: dispel
+                target: actor
+                status: combo_mark
+                source: grant
+                count: 64

@@ -1,0 +1,19 @@
+kind: ability
+id: cooldown_proc
+name: Cooldown proc fixture
+effects:
+  - type: reduce_recharge
+    grant: burst
+    amount: 1s
+    which: earliest
+  - type: restore_charge
+    grant: burst
+    count: 1
+  - type: reduce_cooldown
+    grant: burst
+    amount: 500ms
+  - type: reduce_group_cooldown
+    group: shared_casting
+    amount: 500ms
+  - type: reduce_global_cooldown
+    amount: 100ms

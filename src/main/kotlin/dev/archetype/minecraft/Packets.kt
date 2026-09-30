@@ -43,7 +43,7 @@ data class CastPayload(val classId: String, val grant: String, val generation: L
     }
 }
 
-data class GrantView(val name: String, val slot: String, val cooldownTicks: Int)
+data class GrantView(val name: String, val slot: String, val cooldownTicks: Int, val availableCharges: Int = 0, val maximumCharges: Int = 0, val rechargeTicks: Int = 0)
 data class ResourceView(val name: String, val amount: Double, val maximum: Double)
 data class StatePayload(
     val generation: Long,
@@ -66,6 +66,9 @@ data class StatePayload(
                     buffer.writeUtf(it.name, 128)
                     buffer.writeUtf(it.slot, 64)
                     buffer.writeVarInt(it.cooldownTicks)
+                    buffer.writeVarInt(it.availableCharges)
+                    buffer.writeVarInt(it.maximumCharges)
+                    buffer.writeVarInt(it.rechargeTicks)
                 }
                 buffer.writeVarInt(packet.resources.size)
                 packet.resources.forEach {
@@ -78,7 +81,17 @@ data class StatePayload(
                 val generation = buffer.readLong()
                 val activeClass = buffer.readUtf(128)
                 val classes = List(readCount(buffer, 128)) { buffer.readUtf(128) }
-                val grants = List(readCount(buffer, 128)) { GrantView(buffer.readUtf(128), buffer.readUtf(64), buffer.readVarInt()) }
+                val grants = List(readCount(buffer, 128)) {
+                    val name = buffer.readUtf(128)
+                    val slot = buffer.readUtf(64)
+                    val cooldown = buffer.readVarInt()
+                    val available = buffer.readVarInt()
+                    val maximum = buffer.readVarInt()
+                    val recharge = buffer.readVarInt()
+                    // ASVS 2.2.1: reject malformed client-visible state before storing it in the HUD model.
+                    require(cooldown in 0..72_000 && maximum in 0..16 && available in 0..maximum && recharge in 0..72_000)
+                    GrantView(name, slot, cooldown, available, maximum, recharge)
+                }
                 val resources = List(readCount(buffer, 128)) { ResourceView(buffer.readUtf(128), buffer.readDouble(), buffer.readDouble()) }
                 StatePayload(generation, activeClass, classes, grants, resources)
             },

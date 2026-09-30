@@ -243,6 +243,8 @@ The stable source key combines owner, source class or summon, logical ability gr
 
 An optional `stacks` object declares a maximum and either shared duration or per-stack duration. Shared duration is the default: a successful reapplication refreshes the source contribution's stack lifetime. Per-stack mode expires individual stacks. There is one periodic schedule per source contribution; effects can explicitly read the stack count. Lifecycle callbacks distinguish first application, refresh, a changed stack count, expiry, and cancellation so refreshing does not implicitly replay first-application effects. Boolean restrictions use source accounting; numeric bonuses use strongest contribution or explicit capped addition.
 
+`control_categories` and `immunities` name bounded, namespaced control labels. An immunity blocks new matching control contributions and cancels existing matching contributions without their natural-expiry callbacks. The current parser and runtime behavior are specified in [status-authoring.md](status-authoring.md).
+
 ## Progression and empowerments
 
 A progression track declares thresholds or a cumulative-XP formula, optional cap behavior, stable earning-rule IDs, point awards, and sharing scope. An unlock tree declares stable node IDs, grants, prerequisites, ranks, optional point costs, choice groups, and optional positions. Automatic grants and player-selected talents remain distinct.

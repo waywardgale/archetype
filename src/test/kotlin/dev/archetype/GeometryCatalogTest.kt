@@ -7,14 +7,14 @@ import org.junit.jupiter.api.Test
 import java.nio.file.Path
 
 class GeometryCatalogTest {
-    @Test fun `complete spatial authoring fixtures compile without launching Minecraft`() {
+    @Test fun `supported authoring fixtures compile without launching Minecraft`() {
         val root = Path.of(javaClass.getResource("/packs/spatial")!!.toURI())
         val result = ManifestCompiler().compile(PackCapture.capture(root))
         assertTrue(result is CompileResult.Valid, "$result")
         val definitions = (result as CompileResult.Valid).definitions
-        assertEquals(6, definitions.classes.getValue("workshop:validation_actor").grants.size)
+        assertEquals(14, definitions.classes.getValue("workshop:validation_actor").grants.size)
         assertEquals(1, definitions.areas.size)
-        assertEquals(2, definitions.statuses.size)
+        assertEquals(4, definitions.statuses.size)
     }
     @Test fun `all combat shapes include boundaries and exclude nearby points outside`() {
         val cases = listOf(

@@ -1,0 +1,5 @@
+kind: status
+id: silence
+duration: 2s
+tags: [harmful, control]
+restrictions: [activate]

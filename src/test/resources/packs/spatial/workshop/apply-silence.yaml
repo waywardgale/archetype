@@ -1,0 +1,9 @@
+kind: ability
+id: apply_silence
+name: Silence fixture
+target: {type: entity, range: 16}
+effects:
+  - type: apply_status
+    id: silence_application
+    status: silence
+    target: target

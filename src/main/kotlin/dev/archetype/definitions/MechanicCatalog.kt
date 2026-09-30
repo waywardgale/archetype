@@ -15,6 +15,7 @@ class EffectMechanic<E : Effect>(
     val areaReferences: (E) -> List<String> = { emptyList() },
     val statusReferences: (E) -> List<String> = { emptyList() },
     val statusCreations: (E) -> List<String> = statusReferences,
+    val grantReferences: (E) -> List<String> = { emptyList() },
     val requiresTarget: (E) -> Boolean = { false },
     val requiresEntityTarget: (E) -> Boolean = requiresTarget,
     val requiresGround: (E) -> Boolean = { false },
@@ -28,6 +29,7 @@ class EffectMechanic<E : Effect>(
     fun areas(effect: Effect) = areaReferences(configuration.cast(effect))
     fun statuses(effect: Effect) = statusReferences(configuration.cast(effect))
     fun createdStatuses(effect: Effect) = statusCreations(configuration.cast(effect))
+    fun grants(effect: Effect) = grantReferences(configuration.cast(effect))
     fun needsTarget(effect: Effect) = requiresTarget(configuration.cast(effect))
     fun needsEntityTarget(effect: Effect) = requiresEntityTarget(configuration.cast(effect))
     fun needsGround(effect: Effect) = requiresGround(configuration.cast(effect))
@@ -51,7 +53,11 @@ class MechanicCatalog(registrations: List<EffectMechanic<out Effect>>) {
 
 /** A bounded compiler reader supplied to built-ins and extensions. It retains source field paths. */
 interface EffectReader {
+    fun has(key: String): Boolean
     fun text(key: String): String
+    fun localId(key: String): String
+    fun grant(key: String): String
+    fun option(key: String, choices: Set<String>, default: String): String
     fun integer(key: String, min: Int, max: Int, default: Int? = null): Int
     fun number(key: String, min: Double, max: Double, default: Double? = null): Double
     fun boolean(key: String, default: Boolean): Boolean
@@ -61,6 +67,7 @@ interface EffectReader {
     fun target(key: String): EffectTarget
     fun spatialTarget(key: String, default: SpatialTarget = SpatialTarget.ACTOR): SpatialTarget
     fun effects(key: String, required: Boolean = true): List<Effect>
+    fun choices(key: String): List<WeightedBranch>
     fun condition(key: String): Condition
     fun statusFilter(): StatusFilter
     fun selector(key: String, shape: Shape? = null): Selector
@@ -73,14 +80,28 @@ interface EffectReader {
 interface EffectExecution {
     fun heal(target: EffectTarget, amount: Numeric): Healing?
     fun damage(target: EffectTarget, amount: Numeric, damageType: String): Double?
+    fun readHealth(target: EffectTarget): Map<String, Double>?
     fun resource(id: String, amount: Numeric, spend: Boolean): Double
+    fun setResource(id: String, value: Numeric?): Map<String, Double>
     fun delay(ticks: Int, effects: List<Effect>, count: Int = 1, every: Int = 0)
+    fun sequence(effects: List<Effect>)
     fun branch(condition: Condition, onTrue: List<Effect>, onFalse: List<Effect>)
+    fun choose(effect: Effect.Choose): Map<String, Double>
     fun forEach(effect: Effect.ForEach)
     fun chain(effect: Effect.Chain)
     fun area(effect: Effect.CreateArea)
     fun status(effect: Effect.ApplyStatus)
     fun dispel(effect: Effect.Dispel): Map<String, Double>?
+    fun consumeStatus(effect: Effect.ConsumeStatus): Map<String, Double>?
+    fun readStatus(effect: Effect.ReadStatus): Map<String, Double>?
+    fun setTimer(effect: Effect.SetTimer)
+    fun cancelTimer(effect: Effect.CancelTimer): Map<String, Double>?
+    fun readTimer(effect: Effect.ReadTimer): Map<String, Double>?
+    fun restoreCharge(effect: Effect.RestoreCharge): Map<String, Double>
+    fun reduceCooldown(effect: Effect.ReduceCooldown): Map<String, Double>
+    fun reduceRecharge(effect: Effect.ReduceRecharge): Map<String, Double>
+    fun reduceGroupCooldown(effect: Effect.ReduceGroupCooldown): Map<String, Double>
+    fun reduceGlobalCooldown(effect: Effect.ReduceGlobalCooldown): Map<String, Double>
 }
 
 data class Healing(val restored: Double, val overheal: Double)
@@ -96,6 +117,8 @@ object BuiltinEffects {
     private val target = mapOf<String, Any>("enum" to listOf("actor", "target"))
     private val spatial = mapOf<String, Any>("enum" to listOf("actor", "target", "ground"))
     private val bool = mapOf<String, Any>("type" to "boolean")
+    private val timerName = mapOf<String, Any>("type" to "string", "pattern" to "^[a-z0-9_./-]{1,64}$")
+    private val grantName = mapOf<String, Any>("type" to "string", "pattern" to "^[a-z0-9_./-]{1,128}$")
     val statusFilterFields = mapOf(
         "status" to ref("reference"), "tags" to ref("status_tags"),
         "source" to mapOf<String, Any>("enum" to listOf("any", "actor", "grant"), "default" to "any"),
@@ -113,6 +136,79 @@ object BuiltinEffects {
             requiresTarget = { it.target == EffectTarget.TARGET },
             decode = { Effect.Dispel(it.target("target"), it.statusFilter(), it.integer("count", 1, 64, 1), it.resultName) },
             execute = { e, c -> c.dispel(e) }),
+        EffectMechanic("archetype:consume_status", Effect.ConsumeStatus::class.java,
+            statusFilterFields + mapOf("target" to target, "count" to integer(1, 64)), setOf("target", "count"),
+            "Consumes up to count matching stacks, oldest contribution and earliest-expiring stack first. Partial contributions run stacks_changed; empty contributions are cancelled without expiry gameplay callbacks.",
+            setOf("stacks_removed", "contributions_removed"),
+            statusReferences = { listOfNotNull(it.filter.status) }, statusCreations = { emptyList() },
+            requiresTarget = { it.target == EffectTarget.TARGET },
+            decode = { Effect.ConsumeStatus(it.target("target"), it.statusFilter(), it.integer("count", 1, 64), it.resultName) },
+            execute = { e, c -> c.consumeStatus(e) }),
+        EffectMechanic("archetype:read_status", Effect.ReadStatus::class.java,
+            statusFilterFields + mapOf("target" to target), setOf("target"),
+            "Reads live matching contributions and their total stack count on one recipient. An eligible target with no matches returns zeroes.",
+            setOf("contributions", "stacks"),
+            statusReferences = { listOfNotNull(it.filter.status) }, statusCreations = { emptyList() },
+            requiresTarget = { it.target == EffectTarget.TARGET },
+            decode = { Effect.ReadStatus(it.target("target"), it.statusFilter(), it.resultName) },
+            execute = { e, c -> c.readStatus(e) }),
+        EffectMechanic("archetype:set_timer", Effect.SetTimer::class.java,
+            mapOf("name" to timerName, "target" to target, "duration" to duration, "expired" to (body + ("minItems" to 0))),
+            setOf("name", "target", "duration"),
+            "Sets or refreshes a named timer for this logical grant and recipient. An old expiry cannot fire after refresh. The optional expiry body runs once on natural expiry; cancellation and source cleanup never run it.",
+            children = { listOf(it.expired) }, requiresTarget = { it.target == EffectTarget.TARGET },
+            decode = { Effect.SetTimer(it.localId("name"), it.target("target"), it.duration("duration", positive = true), it.effects("expired", false)) },
+            execute = { e, c -> c.setTimer(e); null }),
+        EffectMechanic("archetype:cancel_timer", Effect.CancelTimer::class.java,
+            mapOf("name" to timerName, "target" to target), setOf("name", "target"),
+            "Cancels this logical grant's named timer for the recipient, including its owned continuations, without an expiry callback.",
+            setOf("cancelled"), requiresTarget = { it.target == EffectTarget.TARGET },
+            decode = { Effect.CancelTimer(it.localId("name"), it.target("target"), it.resultName) },
+            execute = { e, c -> c.cancelTimer(e) }),
+        EffectMechanic("archetype:read_timer", Effect.ReadTimer::class.java,
+            mapOf("name" to timerName, "target" to target), setOf("name", "target"),
+            "Reads this logical grant's named timer for the recipient. An absent timer returns zero for both fields.",
+            setOf("active", "remaining_ticks"), requiresTarget = { it.target == EffectTarget.TARGET },
+            decode = { Effect.ReadTimer(it.localId("name"), it.target("target"), it.resultName) },
+            execute = { e, c -> c.readTimer(e) }),
+        EffectMechanic("archetype:restore_charge", Effect.RestoreCharge::class.java,
+            mapOf("count" to (integer(1, 16) + ("default" to 1)), "grant" to grantName), emptySet(),
+            "Restores up to count missing uses on a logical grant (`self` by default). Removes the corresponding latest recharge timers. Does nothing if the grant has no charges.",
+            setOf("restored", "available_charges"),
+            grantReferences = { listOf(it.grant) },
+            decode = { Effect.RestoreCharge(it.integer("count", 1, 16, 1), if (it.has("grant")) it.grant("grant") else "self", it.resultName) },
+            execute = { e, c -> c.restoreCharge(e) }),
+        EffectMechanic("archetype:reduce_cooldown", Effect.ReduceCooldown::class.java,
+            mapOf("amount" to duration, "grant" to grantName), setOf("amount"),
+            "Reduces a logical grant's active cooldown by a fixed duration, clamping at zero. `grant` defaults to `self`; this never grants a charge.",
+            setOf("remaining_ticks"),
+            grantReferences = { listOf(it.grant) },
+            decode = { Effect.ReduceCooldown(it.duration("amount"), if (it.has("grant")) it.grant("grant") else "self", it.resultName) },
+            execute = { e, c -> c.reduceCooldown(e) }),
+        EffectMechanic("archetype:reduce_recharge", Effect.ReduceRecharge::class.java,
+            mapOf("amount" to duration, "grant" to grantName, "which" to mapOf<String, Any>("enum" to listOf("earliest", "latest", "all"))), setOf("amount"),
+            "Reduces the selected active recharge timer or timers on a logical grant. An expired timer restores one charge; later sequential timers keep their full interval.",
+            setOf("restored", "available_charges", "next_recharge_ticks"),
+            grantReferences = { listOf(it.grant) },
+            decode = { reader ->
+                val selection = when (reader.option("which", setOf("earliest", "latest", "all"), "earliest")) {
+                    "earliest" -> RechargeSelection.EARLIEST
+                    "latest" -> RechargeSelection.LATEST
+                    "all" -> RechargeSelection.ALL
+                    else -> error("invalid recharge selection")
+                }
+                Effect.ReduceRecharge(reader.duration("amount"), if (reader.has("grant")) reader.grant("grant") else "self", selection, reader.resultName)
+            }, execute = { e, c -> c.reduceRecharge(e) }),
+        EffectMechanic("archetype:reduce_group_cooldown", Effect.ReduceGroupCooldown::class.java,
+            mapOf("group" to ref("reference"), "amount" to duration), setOf("group", "amount"),
+            "Reduces a named shared cooldown timer by a fixed duration, clamping at zero.", setOf("remaining_ticks"),
+            decode = { Effect.ReduceGroupCooldown(it.reference("group"), it.duration("amount"), it.resultName) },
+            execute = { e, c -> c.reduceGroupCooldown(e) }),
+        EffectMechanic("archetype:reduce_global_cooldown", Effect.ReduceGlobalCooldown::class.java,
+            mapOf("amount" to duration), setOf("amount"),
+            "Reduces the player-wide opt-in global cooldown by a fixed duration, clamping at zero.", setOf("remaining_ticks"),
+            decode = { Effect.ReduceGlobalCooldown(it.duration("amount"), it.resultName) },
+            execute = { e, c -> c.reduceGlobalCooldown(e) }),
         EffectMechanic("archetype:heal", Effect.Heal::class.java, mapOf("target" to target, "amount" to numeric), setOf("target", "amount"), "Immediate native healing.", setOf("health_restored", "overheal"),
             numericInputs = { mapOf("amount" to it.amount) }, requiresTarget = { it.target == EffectTarget.TARGET },
             decode = { Effect.Heal(it.target("target"), it.numeric("amount"), it.resultName) },
@@ -121,6 +217,11 @@ object BuiltinEffects {
             numericInputs = { mapOf("amount" to it.amount) }, requiresTarget = { it.target == EffectTarget.TARGET },
             decode = { Effect.Damage(it.target("target"), it.numeric("amount"), it.text("damage_type"), it.resultName) },
             execute = { e, c -> c.damage(e.target, e.amount, e.damageType)?.let { mapOf("health_lost" to it) } }),
+        EffectMechanic("archetype:read_health", Effect.ReadHealth::class.java, mapOf("target" to target), setOf("target"),
+            "Reads the recipient's current native health after target revalidation. Returns health, maximum, missing, and fraction; target loss supplies no result.",
+            setOf("health", "maximum", "missing", "fraction"), requiresTarget = { it.target == EffectTarget.TARGET },
+            decode = { Effect.ReadHealth(it.target("target"), it.resultName) },
+            execute = { e, c -> c.readHealth(e.target) }),
         EffectMechanic("archetype:gain_resource", Effect.GainResource::class.java, mapOf("resource" to ref("reference"), "amount" to numeric), setOf("resource", "amount"), "Immediate clamped resource gain.", setOf("amount"),
             numericInputs = { mapOf("amount" to it.amount) }, resourceReferences = { listOf(it.resource) },
             decode = { Effect.GainResource(it.reference("resource"), it.numeric("amount"), it.resultName) },
@@ -129,27 +230,50 @@ object BuiltinEffects {
             numericInputs = { mapOf("amount" to it.amount) }, resourceReferences = { listOf(it.resource) },
             decode = { Effect.SpendResource(it.reference("resource"), it.numeric("amount"), it.resultName) },
             execute = { e, c -> mapOf("amount" to c.resource(e.resource, e.amount, true)) }),
+        EffectMechanic("archetype:set_resource", Effect.SetResource::class.java, mapOf("resource" to ref("reference"), "value" to numeric), setOf("resource", "value"),
+            "Sets a resource balance to a bounded value, clamped to its definition. Returns previous, current and absolute amount changed.",
+            setOf("previous", "current", "changed"), numericInputs = { mapOf("value" to it.value) }, resourceReferences = { listOf(it.resource) },
+            decode = { Effect.SetResource(it.reference("resource"), it.numeric("value"), it.resultName) },
+            execute = { e, c -> c.setResource(e.resource, e.value) }),
+        EffectMechanic("archetype:reset_resource", Effect.ResetResource::class.java, mapOf("resource" to ref("reference")), setOf("resource"),
+            "Resets a resource balance to its declared initial value. Returns previous, current and absolute amount changed.",
+            setOf("previous", "current", "changed"), resourceReferences = { listOf(it.resource) },
+            decode = { Effect.ResetResource(it.reference("resource"), it.resultName) },
+            execute = { e, c -> c.setResource(e.resource, null) }),
         EffectMechanic("archetype:delay", Effect.Delay::class.java, mapOf("duration" to duration, "effects" to body), setOf("duration", "effects"), "Owned continuation, cancelled with its source; shares the originating budget.",
             children = { listOf(it.effects) },
             decode = { Effect.Delay(it.duration("duration", positive = true), it.effects("effects")) },
             execute = { e, c -> c.delay(e.ticks, e.effects); null }),
+        EffectMechanic("archetype:sequence", Effect.Sequence::class.java, mapOf("effects" to body), setOf("effects"),
+            "Runs a nested effect list in order in the current scope. Results produced by the sequence remain available to following steps.",
+            children = { listOf(it.effects) },
+            decode = { Effect.Sequence(it.effects("effects")) },
+            execute = { e, c -> c.sequence(e.effects); null }),
         EffectMechanic("archetype:repeat", Effect.Repeat::class.java, mapOf("count" to integer(1, 64), "every" to duration, "effects" to body), setOf("count", "every", "effects"), "Finite positive-interval repetition with independent invocation bindings and a shared budget.",
             children = { listOf(it.effects) },
             decode = { Effect.Repeat(it.integer("count", 1, 64), it.duration("every", positive = true), it.effects("effects")) },
             execute = { e, c -> c.delay(e.everyTicks, e.effects, e.count, e.everyTicks); null }),
         EffectMechanic("archetype:branch", Effect.Branch::class.java, mapOf("when" to ref("condition"), "then" to body, "else" to (body + ("minItems" to 0))), setOf("when", "then"), "Ordered conditional sequence in the current scope.",
             children = { listOf(it.onTrue, it.onFalse) },
-            numericInputs = { when (val condition = it.condition) {
-                is Condition.Compare -> mapOf("when.left" to condition.left, "when.right" to condition.right)
-                is Condition.ResourceAtLeast -> mapOf("when.amount" to condition.amount)
-                is Condition.HasStatus -> emptyMap()
-            } },
-            resourceReferences = { (it.condition as? Condition.ResourceAtLeast)?.let { listOf(it.resource) }.orEmpty() },
-            statusReferences = { (it.condition as? Condition.HasStatus)?.let { listOfNotNull(it.filter.status) }.orEmpty() },
+            numericInputs = { branch -> branch.condition.leaves().toList().flatMapIndexed { index, condition -> when (condition) {
+                is Condition.Compare -> listOf("when[$index].left" to condition.left, "when[$index].right" to condition.right)
+                is Condition.ResourceAtLeast -> listOf("when[$index].amount" to condition.amount)
+                else -> emptyList()
+            } }.toMap() },
+            resourceReferences = { branch -> branch.condition.leaves().filterIsInstance<Condition.ResourceAtLeast>().map { it.resource }.toList() },
+            statusReferences = { branch -> branch.condition.leaves().filterIsInstance<Condition.HasStatus>().mapNotNull { it.filter.status }.toList() },
             statusCreations = { emptyList() },
-            requiresTarget = { (it.condition as? Condition.HasStatus)?.target == EffectTarget.TARGET },
+            requiresTarget = { branch -> branch.condition.leaves().filterIsInstance<Condition.HasStatus>().any { it.target == EffectTarget.TARGET } },
             decode = { Effect.Branch(it.condition("when"), it.effects("then"), it.effects("else", false)) },
             execute = { e, c -> c.branch(e.condition, e.onTrue, e.onFalse); null }),
+        EffectMechanic("archetype:choose", Effect.Choose::class.java,
+            mapOf("options" to mapOf<String, Any>("type" to "array", "minItems" to 1, "maxItems" to 16,
+                "items" to mapOf("type" to "object", "properties" to mapOf("weight" to integer(1, 1000), "effects" to body),
+                    "required" to listOf("weight", "effects"), "additionalProperties" to false))), setOf("options"),
+            "Draws once on the server and executes one weighted body. Weights are positive integers; ties follow declaration order. The selected zero-based index is available through `as`.",
+            setOf("index"), children = { it.options.map(WeightedBranch::effects) },
+            decode = { Effect.Choose(it.choices("options"), it.resultName) },
+            execute = { e, c -> c.choose(e) }),
         EffectMechanic("archetype:for_each", Effect.ForEach::class.java, mapOf("origin" to spatial, "targets" to ref("shaped_selector"), "effects" to body), setOf("targets", "effects"), "Bounded fresh selection; each target receives private bindings. Delays retain the selected target.",
             children = { listOf(it.effects) }, localBindings = setOf("selection.index"),
             requiresTarget = { it.origin == SpatialTarget.TARGET }, requiresEntityTarget = { false }, requiresGround = { it.origin == SpatialTarget.GROUND }, providesTarget = true,

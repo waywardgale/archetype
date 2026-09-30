@@ -31,7 +31,11 @@ object CatalogExport {
         val conditions = listOf(
             obj(mapOf("type" to mapOf("const" to "compare"), "left" to ref("numeric"), "op" to enum("lt", "lte", "eq", "gte", "gt"), "right" to ref("numeric"))),
             obj(mapOf("type" to mapOf("const" to "resource_at_least"), "resource" to text(), "amount" to ref("numeric"))),
+            obj(mapOf("type" to mapOf("const" to "chance"), "probability" to number(0.0, 1.0))),
             obj(BuiltinEffects.statusFilterFields + mapOf("type" to mapOf("const" to "has_status"), "target" to enum("actor", "target")), listOf("type", "target")),
+            obj(mapOf("all" to array(ref("condition"), 16, 1))),
+            obj(mapOf("any" to array(ref("condition"), 16, 1))),
+            obj(mapOf("not" to ref("condition"))),
         )
         val sizes = number(0.01, 32.0)
         fun shape(type: String, fields: Map<String, Any>, optional: Set<String> = emptySet()) = obj(fields + ("type" to mapOf("const" to type)), listOf("type") + (fields.keys - optional))
@@ -60,7 +64,9 @@ object CatalogExport {
             "name" to text(), "description" to text(), "icon" to text(),
             "activation" to obj(mapOf("type" to mapOf("const" to "activated"))),
             "target" to obj(mapOf("type" to enum("entity", "ground"), "range" to sizes), listOf("type")),
-            "cooldown" to duration,
+            "cooldown" to mapOf("oneOf" to listOf(duration,
+                obj(mapOf("duration" to duration, "groups" to array(text("^(?:[a-z0-9_.-]+:)?[a-z0-9_./-]+$"), 8), "global" to duration), listOf("duration")))),
+            "charges" to obj(mapOf("max" to integer(1, 16), "recharge" to duration, "mode" to enum("sequential", "parallel")), listOf("max", "recharge")),
             "costs" to array(obj(mapOf("resource" to text(), "amount" to ref("numeric"))), 128),
             "effects" to array(ref("effect"), 64, 1),
         )
@@ -94,6 +100,9 @@ object CatalogExport {
             "status" to obj(mapOf(
                 "kind" to mapOf("const" to "status"), "id" to text(), "duration" to duration, "reapply" to mapOf("const" to "refresh"),
                 "tags" to ref("status_tags"),
+                "control_categories" to ref("status_tags"),
+                "immunities" to ref("status_tags"),
+                "restrictions" to array(enum("activate"), 1),
                 "stacks" to obj(mapOf("max" to integer(1, 64), "duration" to enum("shared", "per_stack")), listOf("max")),
                 "applied" to array(ref("effect"), 64), "refreshed" to array(ref("effect"), 64), "stacks_changed" to array(ref("effect"), 64), "expired" to array(ref("effect"), 64),
                 "periodic" to obj(mapOf("every" to duration, "effects" to array(ref("effect"), 64, 1))),

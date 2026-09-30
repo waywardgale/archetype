@@ -1,0 +1,13 @@
+kind: ability
+id: resource_reset
+name: Resource reset fixture
+effects:
+  - type: set_resource
+    resource: focus
+    value: 5
+  - type: reset_resource
+    resource: focus
+    as: reset
+  - type: heal
+    target: actor
+    amount: {expr: 'result.reset.changed'}

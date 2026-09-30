@@ -2,6 +2,8 @@ package dev.archetype
 
 import dev.archetype.minecraft.PlayerStore
 import dev.archetype.runtime.PlayerRecord
+import dev.archetype.runtime.ChargeState
+import dev.archetype.definitions.RechargeMode
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
@@ -20,6 +22,7 @@ class PlayerStoreTest {
             resources["workshop:fighter|workshop:focus"] = 7.0
             cooldowns["workshop:fighter|primary"] = 35
             regenerationTimers["workshop:fighter|workshop:focus"] = 12
+            charges["workshop:fighter|primary"] = ChargeState(3, 1, RechargeMode.PARALLEL, mutableListOf(7, 18))
         }
         val store = PlayerStore(directory)
         store.save(id, record)
@@ -30,6 +33,19 @@ class PlayerStoreTest {
         assertEquals(record.resources, loaded.resources)
         assertEquals(record.cooldowns, loaded.cooldowns)
         assertEquals(record.regenerationTimers, loaded.regenerationTimers)
+        assertEquals(record.charges, loaded.charges)
+    }
+
+    @Test fun `older player records without charges remain readable`() {
+        val id = UUID.randomUUID()
+        Files.writeString(directory.resolve("$id.json"), """{"version":1,"owned_classes":[],"active_classes":[],"resources":{},"cooldowns":{}}""")
+        assertTrue(PlayerStore(directory).load(id)!!.charges.isEmpty())
+    }
+
+    @Test fun `invalid charge counts cannot enter player state`() {
+        val id = UUID.randomUUID()
+        Files.writeString(directory.resolve("$id.json"), """{"version":1,"owned_classes":[],"active_classes":[],"resources":{},"cooldowns":{},"charges":{"workshop:fighter|primary":{"capacity":2,"available":3,"mode":"parallel","timers":[]}}}""")
+        assertNull(PlayerStore(directory).load(id))
     }
 
     @Test fun `invalid saved data are not treated as a fresh player`() {

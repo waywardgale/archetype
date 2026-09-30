@@ -1,0 +1,27 @@
+kind: ability
+id: combo_window
+name: Combo window fixture
+target: {type: entity, range: 16}
+effects:
+  - type: read_timer
+    name: combo
+    target: target
+    as: window
+  - type: branch
+    when: {type: compare, left: {expr: 'result.window.active'}, op: gt, right: 0}
+    then:
+      - type: cancel_timer
+        name: combo
+        target: target
+      - type: heal
+        target: actor
+        amount: {expr: 'result.window.remaining_ticks'}
+    else:
+      - type: set_timer
+        name: combo
+        target: target
+        duration: 2s
+        expired:
+          - type: gain_resource
+            resource: focus
+            amount: 1

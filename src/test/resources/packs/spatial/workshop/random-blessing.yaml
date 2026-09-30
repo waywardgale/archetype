@@ -1,0 +1,23 @@
+kind: ability
+id: random_blessing
+name: Weighted choice fixture
+effects:
+  - type: choose
+    as: picked
+    options:
+      - weight: 1
+        effects: [{type: heal, target: actor, amount: 1}]
+      - weight: 3
+        effects: [{type: gain_resource, resource: focus, amount: 2}]
+  - type: branch
+    when: {type: chance, probability: 0.25}
+    then:
+      - type: sequence
+        effects:
+          - type: heal
+            target: actor
+            amount: {expr: 'result.picked.index + 1'}
+            as: bonus
+          - type: gain_resource
+            resource: focus
+            amount: {expr: 'result.bonus.health_restored'}

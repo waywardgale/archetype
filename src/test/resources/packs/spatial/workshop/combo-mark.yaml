@@ -1,0 +1,4 @@
+kind: status
+id: combo_mark
+duration: 500ms
+stacks: {max: 2}

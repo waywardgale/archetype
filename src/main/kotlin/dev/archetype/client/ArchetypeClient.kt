@@ -61,7 +61,9 @@ object ArchetypeClient : ClientModInitializer {
             current.grants.forEachIndexed { index, grant ->
                 val key = slots.getOrNull(index)?.translatedKeyMessage?.string ?: "-"
                 val cooldown = if (grant.cooldownTicks > 0) "  ${"%.1f".format(grant.cooldownTicks / 20.0)}s" else ""
-                graphics.text(client.font, "$key  ${grant.name}$cooldown", left, top, 0xFFFFFFFF.toInt())
+                val charges = if (grant.maximumCharges > 0) "  ${grant.availableCharges}/${grant.maximumCharges}" +
+                    if (grant.rechargeTicks > 0) " (${"%.1f".format(grant.rechargeTicks / 20.0)}s)" else "" else ""
+                graphics.text(client.font, "$key  ${grant.name}$charges$cooldown", left, top, 0xFFFFFFFF.toInt())
                 top += 11
             }
             current.resources.forEach { resource ->

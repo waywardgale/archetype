@@ -8,3 +8,11 @@ abilities:
   query: {ref: beam_query, slot: query}
   scorch: {ref: apply_scorch, slot: status}
   cleanse: {ref: cleanse, slot: cleanse}
+  window: {ref: combo_window, slot: window}
+  burst: {ref: charged_burst, slot: burst}
+  detonate: {ref: detonate_scorch, slot: detonate}
+  combo: {ref: combo_strike, slot: combo}
+  proc: {ref: cooldown_proc, slot: proc}
+  silence: {ref: apply_silence, slot: silence}
+  random: {ref: random_blessing, slot: random}
+  resource: {ref: resource_reset, slot: resource}

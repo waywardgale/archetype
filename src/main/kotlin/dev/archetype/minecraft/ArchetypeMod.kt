@@ -221,7 +221,9 @@ object ArchetypeMod : ModInitializer {
             val active = record.activeClasses.firstOrNull { it in runtime.definitions.classes }.orEmpty()
             val classDef = runtime.definitions.classes[active]
             val grants = classDef?.grants?.values?.take(128)?.map {
-                GrantView(it.name, it.slot.orEmpty(), record.cooldowns["$active|${it.name}"] ?: 0)
+                val charges = runtime.chargeState(player.uuid, active, it.name)
+                GrantView(it.name, it.slot.orEmpty(), runtime.cooldownRemaining(player.uuid, active, it.name),
+                    charges?.available ?: 0, charges?.capacity ?: 0, charges?.timers?.minOrNull() ?: 0)
             }.orEmpty()
             val resources = runtime.definitions.resources.values.take(128).map { resource ->
                 val key = "${if (resource.scope == ResourceScope.PLAYER) "player" else active}|${resource.id}"

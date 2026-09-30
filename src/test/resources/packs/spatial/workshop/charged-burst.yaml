@@ -1,0 +1,19 @@
+kind: ability
+id: charged_burst
+name: Charged burst fixture
+target: {type: entity, range: 16}
+cooldown: {duration: 500ms, groups: [shared_casting], global: 100ms}
+charges: {max: 2, recharge: 3s, mode: parallel}
+effects:
+  - type: damage
+    target: target
+    amount: 3
+    damage_type: minecraft:magic
+    as: strike
+  - type: branch
+    when: {type: compare, left: {expr: 'result.strike.health_lost'}, op: gt, right: 0}
+    then:
+      - type: restore_charge
+        count: 1
+  - type: reduce_cooldown
+    amount: 100ms

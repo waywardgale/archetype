@@ -1,0 +1,15 @@
+kind: ability
+id: detonate_scorch
+name: Detonate scorch fixture
+target: {type: entity, range: 16}
+effects:
+  - type: consume_status
+    target: target
+    status: scorch
+    source: actor
+    count: 3
+    as: consumed
+  - type: damage
+    target: target
+    amount: {expr: 'result.consumed.stacks_removed * 4'}
+    damage_type: minecraft:magic

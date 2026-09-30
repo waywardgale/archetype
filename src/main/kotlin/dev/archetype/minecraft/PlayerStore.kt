@@ -3,6 +3,8 @@ package dev.archetype.minecraft
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import dev.archetype.runtime.PlayerRecord
+import dev.archetype.runtime.ChargeState
+import dev.archetype.definitions.RechargeMode
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.file.Files
@@ -42,6 +44,24 @@ class PlayerStore(private val directory: Path) {
                 require(ticks in 0..72_000)
                 record.regenerationTimers[checkedKey(key)] = ticks
             }
+            json.getAsJsonObject("charges")?.entrySet()?.let { entries ->
+                // ASVS 1.5.2, 2.2.1: saved state uses a fixed object shape and bounded numeric fields.
+                require(entries.size <= 256)
+                entries.forEach { (key, value) ->
+                    val item = value.asJsonObject
+                    require(item.keySet() == setOf("capacity", "available", "mode", "timers"))
+                    val capacity = boundedInteger(item.get("capacity"), 1, 16)
+                    val available = boundedInteger(item.get("available"), 0, capacity)
+                    val mode = when (item.get("mode").asString) {
+                        "sequential" -> RechargeMode.SEQUENTIAL
+                        "parallel" -> RechargeMode.PARALLEL
+                        else -> error("unknown recharge mode")
+                    }
+                    val timers = item.getAsJsonArray("timers").map { boundedInteger(it, 1, 72_000) }.toMutableList()
+                    require(timers.size <= capacity && (mode != RechargeMode.SEQUENTIAL || timers.size <= 1))
+                    record.charges[checkedKey(key)] = ChargeState(capacity, available, mode, timers)
+                }
+            }
             record
         } catch (_: Exception) { null }
     }
@@ -55,6 +75,14 @@ class PlayerStore(private val directory: Path) {
             add("resources", JsonObject().also { obj -> record.resources.forEach { (key, value) -> obj.addProperty(key, value) } })
             add("cooldowns", JsonObject().also { obj -> record.cooldowns.forEach { (key, value) -> obj.addProperty(key, value) } })
             add("regeneration_timers", JsonObject().also { obj -> record.regenerationTimers.forEach { (key, value) -> obj.addProperty(key, value) } })
+            add("charges", JsonObject().also { obj -> record.charges.forEach { (key, state) ->
+                obj.add(key, JsonObject().also { item ->
+                    item.addProperty("capacity", state.capacity)
+                    item.addProperty("available", state.available)
+                    item.addProperty("mode", state.mode.name.lowercase())
+                    item.add("timers", com.google.gson.JsonArray().also { array -> state.timers.forEach(array::add) })
+                })
+            } })
         }
         val bytes = json.toString().toByteArray(Charsets.UTF_8)
         require(bytes.size <= 1_048_576) { "player record is too large" }
@@ -76,6 +104,10 @@ class PlayerStore(private val directory: Path) {
     private fun checkedKey(value: String): String {
         require(value.length <= 256 && value.all { it.isLetterOrDigit() || it in "_:|./-#" })
         return value
+    }
+    private fun boundedInteger(value: com.google.gson.JsonElement, minimum: Int, maximum: Int): Int {
+        require(value.isJsonPrimitive && value.asJsonPrimitive.isNumber && value.asString.matches(Regex("[0-9]+")))
+        return value.asString.toIntOrNull()?.also { require(it in minimum..maximum) } ?: error("integer is out of range")
     }
     private companion object { val ID = Regex("[a-z0-9_.-]+:[a-z0-9_./-]+") }
 }
