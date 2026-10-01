@@ -1,0 +1,10 @@
+kind: ability
+id: push_followup
+name: Push follow-up
+target: {type: entity, range: 16}
+effects:
+  - {type: impulse, target: target, direction: away, distance: 4, as: motion}
+  - type: branch
+    when: {type: compare, left: {expr: 'result.motion.blocked'}, op: eq, right: 1}
+    then:
+      - {type: damage, target: target, amount: 3, damage_type: minecraft:magic}

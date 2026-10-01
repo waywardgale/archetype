@@ -30,6 +30,12 @@ class PlayerStore(private val directory: Path) {
             val record = PlayerRecord()
             json.getAsJsonArray("owned_classes").forEach { record.ownedClasses += checkedId(it.asString) }
             json.getAsJsonArray("active_classes").forEach { record.activeClasses += checkedId(it.asString) }
+            json.getAsJsonObject("specializations")?.entrySet()?.let { selections ->
+                require(selections.size <= 128)
+                selections.forEach { (classId, specialization) ->
+                    record.specializations[checkedId(classId)] = checkedId(specialization.asString)
+                }
+            }
             json.getAsJsonObject("resources").entrySet().forEach { (key, value) ->
                 require(value.isJsonPrimitive && value.asJsonPrimitive.isNumber)
                 val amount = value.asDouble
@@ -145,6 +151,9 @@ class PlayerStore(private val directory: Path) {
             addProperty("version", 1)
             add("owned_classes", com.google.gson.JsonArray().also { array -> record.ownedClasses.forEach(array::add) })
             add("active_classes", com.google.gson.JsonArray().also { array -> record.activeClasses.forEach(array::add) })
+            add("specializations", JsonObject().also { obj -> record.specializations.forEach { (classId, specialization) ->
+                obj.addProperty(classId, specialization)
+            } })
             add("resources", JsonObject().also { obj -> record.resources.forEach { (key, value) -> obj.addProperty(key, value) } })
             add("cooldowns", JsonObject().also { obj -> record.cooldowns.forEach { (key, value) -> obj.addProperty(key, value) } })
             add("regeneration_timers", JsonObject().also { obj -> record.regenerationTimers.forEach { (key, value) -> obj.addProperty(key, value) } })

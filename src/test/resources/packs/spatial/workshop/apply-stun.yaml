@@ -1,0 +1,6 @@
+kind: ability
+id: apply_stun
+name: Apply stun
+target: {type: entity, range: 16}
+effects:
+  - {type: apply_status, id: stun_application, status: stun, target: target}

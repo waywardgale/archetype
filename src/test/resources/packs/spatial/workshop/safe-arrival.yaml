@@ -1,0 +1,10 @@
+kind: ability
+id: safe_arrival
+name: Safe arrival
+target: {type: ground, range: 16}
+effects:
+  - {type: safe_teleport, target: actor, destination: ground, as: arrival}
+  - type: branch
+    when: {type: compare, left: {expr: 'result.arrival.arrived'}, op: eq, right: 1}
+    then:
+      - {type: heal, target: actor, amount: 2}

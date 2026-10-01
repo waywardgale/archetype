@@ -37,6 +37,82 @@ earn:
         return ManifestCompiler().compile(PackSnapshot(files.map { SourceFile(it.first, it.second.toByteArray()) }, fingerprint))
     }
 
+    @Test fun `server-observed vanilla XP uses bounded per-point earning multiplier`() {
+        val track = """kind: progression_track
+id: practice
+scope: class
+levels:
+  - {level: 1, xp: 0}
+  - {level: 2, xp: 100}
+earn:
+  pickup: {event: vanilla_xp, amount: 2}"""
+        val compiled = compile("vanilla", track)
+        assertTrue(compiled is CompileResult.Valid, "$compiled")
+        val runtime = AbilityRuntime(World())
+        runtime.publish((compiled as CompileResult.Valid).definitions)
+        runtime.selectClass(actor, "workshop:mage")
+        runtime.onVanillaExperience(actor, 7)
+        runtime.onVanillaExperience(actor, 0)
+        runtime.onVanillaExperience(actor, -4)
+        assertEquals(14, runtime.progress(actor, "workshop:practice")?.earnedXp)
+        runtime.onVanillaExperience(actor, Int.MAX_VALUE)
+        assertEquals(1_000_014, runtime.progress(actor, "workshop:practice")?.earnedXp)
+    }
+
+    @Test fun `vanilla XP rule cannot transfer rewards to nearby allies`() {
+        val track = """kind: progression_track
+id: practice
+scope: class
+levels: [{level: 1, xp: 0}]
+earn:
+  pickup:
+    event: vanilla_xp
+    recipients: {type: nearby_allies, range: 24}"""
+        val result = compile("invalid-vanilla", track) as CompileResult.Invalid
+        assertTrue(result.diagnostics.any { it.field.startsWith("earn.pickup") }, "$result")
+    }
+
+    @Test fun `contributors receive death XP only after real recent health loss`() {
+        val second = UUID(0, 142)
+        val victim = UUID(0, 144)
+        val track = """kind: progression_track
+id: practice
+scope: class
+levels: [{level: 1, xp: 0}]
+earn:
+  assist: {event: entity_death, amount: 5, recipients: {type: contributors}, distribution: split}"""
+        val runtime = AbilityRuntime(World())
+        runtime.publish((compile(track = track) as CompileResult.Valid).definitions)
+        runtime.selectClass(actor, "workshop:mage")
+        runtime.selectClass(second, "workshop:mage")
+        runtime.recordContribution(victim, actor, 0.0)
+        runtime.onEntityDeath(null, victim = victim)
+        assertEquals(0, runtime.progress(actor, "workshop:practice")?.earnedXp)
+        runtime.recordContribution(victim, actor, 3.0)
+        runtime.recordContribution(victim, second, 2.0)
+        runtime.recordContribution(victim, actor, 1.0)
+        runtime.onEntityDeath(null, victim = victim)
+        assertEquals(3, runtime.progress(actor, "workshop:practice")?.earnedXp)
+        assertEquals(2, runtime.progress(second, "workshop:practice")?.earnedXp)
+        runtime.onEntityDeath(null, victim = victim)
+        assertEquals(3, runtime.progress(actor, "workshop:practice")?.earnedXp)
+        runtime.recordContribution(victim, actor, 1.0)
+        repeat(401) { runtime.tick(listOf(actor, second)) }
+        runtime.onEntityDeath(null, victim = victim)
+        assertEquals(3, runtime.progress(actor, "workshop:practice")?.earnedXp)
+    }
+
+    @Test fun `contributors cannot declare nearby range`() {
+        val track = """kind: progression_track
+id: practice
+scope: class
+levels: [{level: 1, xp: 0}]
+earn:
+  assist: {event: entity_death, recipients: {type: contributors, range: 24}}"""
+        val result = compile(track = track) as CompileResult.Invalid
+        assertTrue(result.diagnostics.any { it.field.contains("earn.assist.recipients.range") })
+    }
+
     @Test fun classXpAndOneTimeAwardsSurviveSwitchDeathAndCurveEdit() {
         val runtime = AbilityRuntime(World())
         runtime.publish((compile() as CompileResult.Valid).definitions)

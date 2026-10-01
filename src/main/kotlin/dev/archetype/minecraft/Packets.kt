@@ -20,13 +20,25 @@ data class SelectClassPayload(val classId: String) : CustomPacketPayload {
     }
 }
 
-data class CastPayload(val classId: String, val grant: String, val generation: Long, val target: UUID?) : CustomPacketPayload {
+data class SelectSpecializationPayload(val classId: String, val specializationId: String) : CustomPacketPayload {
+    override fun type(): CustomPacketPayload.Type<out CustomPacketPayload> = TYPE
+    companion object {
+        val TYPE = CustomPacketPayload.Type<SelectSpecializationPayload>(packetId("select_specialization"))
+        val CODEC: StreamCodec<RegistryFriendlyByteBuf, SelectSpecializationPayload> = StreamCodec.of(
+            { buffer, packet -> buffer.writeUtf(packet.classId, 128); buffer.writeUtf(packet.specializationId, 128) },
+            { buffer -> SelectSpecializationPayload(buffer.readUtf(128), buffer.readUtf(128)) },
+        )
+    }
+}
+
+data class CastPayload(val classId: String, val specializationId: String, val grant: String, val generation: Long, val target: UUID?) : CustomPacketPayload {
     override fun type(): CustomPacketPayload.Type<out CustomPacketPayload> = TYPE
     companion object {
         val TYPE = CustomPacketPayload.Type<CastPayload>(packetId("cast"))
         val CODEC: StreamCodec<RegistryFriendlyByteBuf, CastPayload> = StreamCodec.of(
             { buffer, packet ->
                 buffer.writeUtf(packet.classId, 128)
+                buffer.writeUtf(packet.specializationId, 128)
                 buffer.writeUtf(packet.grant, 128)
                 buffer.writeLong(packet.generation)
                 buffer.writeBoolean(packet.target != null)
@@ -34,22 +46,24 @@ data class CastPayload(val classId: String, val grant: String, val generation: L
             },
             { buffer ->
                 val classId = buffer.readUtf(128)
+                val specializationId = buffer.readUtf(128)
                 val grant = buffer.readUtf(128)
                 val generation = buffer.readLong()
                 val target = if (buffer.readBoolean()) buffer.readUUID() else null
-                CastPayload(classId, grant, generation, target)
+                CastPayload(classId, specializationId, grant, generation, target)
             },
         )
     }
 }
 
-data class ReleasePayload(val classId: String, val grant: String, val generation: Long, val target: UUID?) : CustomPacketPayload {
+data class ReleasePayload(val classId: String, val specializationId: String, val grant: String, val generation: Long, val target: UUID?) : CustomPacketPayload {
     override fun type(): CustomPacketPayload.Type<out CustomPacketPayload> = TYPE
     companion object {
         val TYPE = CustomPacketPayload.Type<ReleasePayload>(packetId("release"))
         val CODEC: StreamCodec<RegistryFriendlyByteBuf, ReleasePayload> = StreamCodec.of(
             { buffer, packet ->
                 buffer.writeUtf(packet.classId, 128)
+                buffer.writeUtf(packet.specializationId, 128)
                 buffer.writeUtf(packet.grant, 128)
                 buffer.writeLong(packet.generation)
                 buffer.writeBoolean(packet.target != null)
@@ -57,9 +71,10 @@ data class ReleasePayload(val classId: String, val grant: String, val generation
             },
             { buffer ->
                 val classId = buffer.readUtf(128)
+                val specializationId = buffer.readUtf(128)
                 val grant = buffer.readUtf(128)
                 val generation = buffer.readLong()
-                ReleasePayload(classId, grant, generation, if (buffer.readBoolean()) buffer.readUUID() else null)
+                ReleasePayload(classId, specializationId, grant, generation, if (buffer.readBoolean()) buffer.readUUID() else null)
             },
         )
     }
@@ -95,7 +110,9 @@ data class TalentNodeView(val tree: String, val node: String, val automatic: Boo
 data class StatePayload(
     val generation: Long,
     val activeClass: String,
+    val activeSpecialization: String,
     val classes: List<String>,
+    val specializations: List<String>,
     val grants: List<GrantView>,
     val resources: List<ResourceView>,
     val progression: List<TrackView>,
@@ -108,8 +125,11 @@ data class StatePayload(
             { buffer, packet ->
                 buffer.writeLong(packet.generation)
                 buffer.writeUtf(packet.activeClass, 128)
+                buffer.writeUtf(packet.activeSpecialization, 128)
                 buffer.writeVarInt(packet.classes.size)
                 packet.classes.forEach { buffer.writeUtf(it, 128) }
+                buffer.writeVarInt(packet.specializations.size)
+                packet.specializations.forEach { buffer.writeUtf(it, 128) }
                 buffer.writeVarInt(packet.grants.size)
                 packet.grants.forEach {
                     buffer.writeUtf(it.name, 128)
@@ -154,7 +174,9 @@ data class StatePayload(
             { buffer ->
                 val generation = buffer.readLong()
                 val activeClass = buffer.readUtf(128)
+                val activeSpecialization = buffer.readUtf(128)
                 val classes = List(readCount(buffer, 128)) { buffer.readUtf(128) }
+                val specializations = List(readCount(buffer, 256)) { buffer.readUtf(128) }
                 val grants = List(readCount(buffer, 128)) {
                     val name = buffer.readUtf(128)
                     val slot = buffer.readUtf(64)
@@ -195,7 +217,7 @@ data class StatePayload(
                     require(maximum in 1..16 && rank in 0..maximum && cost in 0..1000 && points in 0..1_000_000 && requiredLevel in 1..128)
                     TalentNodeView(tree, node, automatic, rank, maximum, cost, points, requiredLevel, reason)
                 }
-                StatePayload(generation, activeClass, classes, grants, resources, progression, talents)
+                StatePayload(generation, activeClass, activeSpecialization, classes, specializations, grants, resources, progression, talents)
             },
         )
         private fun readCount(buffer: RegistryFriendlyByteBuf, limit: Int): Int = buffer.readVarInt().also {
@@ -207,6 +229,7 @@ data class StatePayload(
 object Packets {
     fun register() {
         PayloadTypeRegistry.serverboundPlay().register(SelectClassPayload.TYPE, SelectClassPayload.CODEC)
+        PayloadTypeRegistry.serverboundPlay().register(SelectSpecializationPayload.TYPE, SelectSpecializationPayload.CODEC)
         PayloadTypeRegistry.serverboundPlay().register(CastPayload.TYPE, CastPayload.CODEC)
         PayloadTypeRegistry.serverboundPlay().register(ReleasePayload.TYPE, ReleasePayload.CODEC)
         PayloadTypeRegistry.serverboundPlay().register(TalentSelectPayload.TYPE, TalentSelectPayload.CODEC)

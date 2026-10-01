@@ -1,6 +1,6 @@
 # Statuses and membership buffs in the current build
 
-Statuses support timed source contributions, capped stacks, periodic work, lifecycle callbacks, an additive native movement speed bonus, status-owned complete ability replacements, tags, presence conditions, bounded dispels, activation restrictions, control-category immunity, health-loss break rules, per-contribution state inside callbacks, and filtered external reads and writes. This is part of the accepted v1 contract. Movement, jump, and attack restrictions, other attributes, additional modifier types, and client status feedback remain required.
+Statuses support timed source contributions, capped stacks, periodic work, lifecycle callbacks, an additive native movement speed bonus, bounded damage reflection, status-owned complete ability replacements, tags, presence conditions, bounded dispels, activation/movement/jump/attack restrictions, control-category immunity, health-loss break rules, per-contribution state inside callbacks, and filtered external reads and writes. This is part of the accepted v1 contract. Other attributes, additional modifier types, and client status feedback remain required.
 
 A status can attach a `scope: status` state definition with `state: {ref: memory}`. Its applied, refresh, periodic, expiry, and break callbacks share one transient field map per source contribution. Refresh keeps those fields; source removal frees them. See [state authoring](state-authoring.md) for field grammar and the `memory_mark` fixture for a per-source pulse counter.
 
@@ -63,7 +63,19 @@ The implemented attribute modifier accepts a constant additive amount in 0..1. `
 
 Each source supplies its bonus once, regardless of stack count. Periodic effects can scale explicitly using `status.stacks`. The native adapter updates only `archetype:status_movement_speed`, a transient additive attribute modifier. It preserves base values and unrelated modifiers. Removing a stronger source restores the remaining weaker bonus, and removing the final source removes Archetype's modifier.
 
-Negative speed changes, movement/jump/attack restrictions, live numeric expressions, other attribute types, and status-owned ability replacements remain gaps in the accepted v1 implementation.
+Negative speed changes, live numeric expressions, and other attribute types remain gaps in the accepted v1 implementation.
+
+## Damage reflection
+
+```yaml
+kind: status
+id: workshop:mirror
+duration: 5s
+modifiers:
+  - {type: reflect, fraction: 0.25, cap: 8, damage_type: minecraft:magic}
+```
+
+Each active source contribution reflects the declared fraction of actual health loss from a native hit back to its server-identified attacker, capped per contribution and hit. At most eight contributions run per hit. A fully prevented hit reflects nothing. Reflected damage uses the status owner's native damage attribution and obeys the adapter's ordinary target and PvP checks. A reflected hit cannot recursively reflect. The damage type must exist in the server registry. Reflection ends with the source status and does not scale automatically with stack count. A Fabric game test verifies one capped reaction to a real native hit.
 
 ## Area membership buffs
 
@@ -81,7 +93,7 @@ Overlapping areas remain separate even when they come from repeated casts of the
 
 A status may declare `tags: [harmful, fire]`. Tags are labels, with no built-in polarity or immunity behavior. Local labels gain the pack namespace, so these become `workshop:harmful` and `workshop:fire` in the workshop pack. Namespaced labels use the same declared dependency checks as references. A supplied list must contain 1..16 distinct labels. Labels need no separate definitions.
 
-`restrictions: [activate]` blocks new ability activations on the status recipient. The server checks active contributions before charging resources, consuming charges, or starting cooldowns. Overlapping restrictions remain until every contributing source ends. The current build supports only `activate`; movement, jump, and attack restrictions remain unimplemented.
+`restrictions` accepts any distinct subset of `activate`, `move`, `jump`, and `attack`. `activate` blocks new ability activations before costs, charges, or cooldowns commit. `move` rejects player position, vehicle, and directional input packets as well as authored dash/push/pull/teleport movement. `jump` rejects a grounded player's attempted upward jump packet and clears vehicle jump input. `attack` cancels ordinary entity and block attacks through Fabric callbacks. The server checks active contributions; overlapping restrictions remain until every contributing source ends. An opt-in Fabric game test verifies that a rooted player's movement packet leaves its server position unchanged. Vehicle, jump, attack, and connected-client behavior still require running-world tests. The [stun fixture](../src/test/resources/packs/spatial/workshop/stun.yaml) combines all four actions.
 
 `break_on_damage: {minimum_health_loss: 1}` removes a source contribution after a native hit actually lowers its recipient's health by at least the declared amount. The default threshold is zero, but a hit must still cause positive health loss. Armor, vanilla absorption, framework barriers, invulnerability, and cancelled hits do not count as health loss. Each matching contribution breaks once; an optional `broken` effect list runs after removal with the original `status.stacks` binding. Ordinary expiry and source cancellation do not run `broken`. The native outcome bridge compiles and deterministic tests cover this ordering, but running-world behavior still needs verification.
 
@@ -180,4 +192,4 @@ Status checks, dispels, and stack consumption reserve 64 candidate inspections p
 
 Area/status creation cycles, unknown references, invalid callback contexts, and unsupported fields fail the whole definition set. Registered effects declare `statusReferences` through the shared catalog; compiler reference validation and runtime dependency reconciliation use those declarations. Exported schemas cover the supported status structure, while semantic checks remain in `validatePacks` and native registry checks run on the server.
 
-The optional fixture pack includes the timed scorch application, the field's membership speed buff, a cleanse that heals according to removed stacks, a detonation that consumes stacks for damage, and a three-step combo. The combo reads live stacks, advances only after actual health loss, refreshes its timer, and consumes stacks for a finisher. Deterministic tests cover cadence, both stack-duration modes, callback ordering, overlapping memberships, recipient limits, bounded reference expansion, and lifecycle/reload cleanup. Removal tests cover source and tag intersections, ordering, actual result counts, partial callbacks, self-removal, descendant cleanup, membership reentry, target loss, and prepayment bounds. Native movement speed compatibility is established by compilation against cached Minecraft 26.2 binaries. Gameplay and client rendering remain unverified in a running world.
+The optional fixture pack includes the timed scorch application, the field's membership speed buff, a cleanse that heals according to removed stacks, a detonation that consumes stacks for damage, a reflection window, and a three-step combo. The combo reads live stacks, advances only after actual health loss, refreshes its timer, and consumes stacks for a finisher. Deterministic tests cover cadence, both stack-duration modes, callback ordering, overlapping memberships, recipient limits, bounded reference expansion, and lifecycle/reload cleanup. Removal tests cover source and tag intersections, ordering, actual result counts, partial callbacks, self-removal, descendant cleanup, membership reentry, target loss, and prepayment bounds. Native movement speed compatibility is established by compilation against cached Minecraft 26.2 binaries. Selected damage, movement, and packet paths pass focused Fabric game tests; connected-client rendering remains unverified.

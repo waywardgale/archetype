@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "archetype-gametest",
+  "version": "1.0.0",
+  "name": "Archetype native game tests",
+  "environment": "*",
+  "entrypoints": {
+    "fabric-gametest": ["dev.archetype.gametest.MovementGameTest", "dev.archetype.gametest.CombatGameTest", "dev.archetype.gametest.RestrictionGameTest"]
+  },
+  "depends": {
+    "archetype": "*",
+    "fabric-api": "*"
+  }
+}

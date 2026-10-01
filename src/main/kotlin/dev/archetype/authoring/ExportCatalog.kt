@@ -60,8 +60,15 @@ object CatalogExport {
             "filters" to array(mapOf("oneOf" to listOf(
                 obj(mapOf("type" to mapOf("const" to "relation"), "is" to enum("any", "ally", "enemy", "self"))),
                 obj(mapOf("type" to mapOf("const" to "health_fraction"), "min" to number(0.0, 1.0), "max" to number(0.0, 1.0)), listOf("type")),
+                obj(mapOf("type" to mapOf("const" to "facing_origin"), "max_degrees" to number(0.0, 180.0)), listOf("type")),
+                obj(mapOf("type" to mapOf("const" to "entity_type"), "id" to text("^[a-z0-9_.-]+:[a-z0-9_./-]+$"))),
             )), 8),
         )
+        val grantMap = mapOf("type" to "object", "maxProperties" to 128, "propertyNames" to (localId + mapOf("maxLength" to 128)),
+            "additionalProperties" to mapOf("oneOf" to listOf(
+                obj(mapOf("ref" to text(), "slot" to (localId + mapOf("maxLength" to 64))), listOf("ref")),
+                obj(mapOf("definition" to ref("inline_ability"), "slot" to (localId + mapOf("maxLength" to 64))), listOf("definition")),
+            )))
         val abilityFields = mapOf(
             "name" to text(), "description" to text(), "icon" to text(),
             "activation" to obj(mapOf("type" to enum("activated", "passive", "toggle", "channel", "charge", "confirm", "recast"),
@@ -143,7 +150,7 @@ object CatalogExport {
                 "immunities" to ref("status_tags"),
                 "break_on_damage" to obj(mapOf("minimum_health_loss" to number(0.0, 1_000_000.0)), emptyList()),
                 "broken" to array(ref("effect"), 64),
-                "restrictions" to array(enum("activate"), 1),
+                "restrictions" to array(enum("activate", "move", "jump", "attack"), 4),
                 "stacks" to obj(mapOf("max" to integer(1, 64), "duration" to enum("shared", "per_stack")), listOf("max")),
                 "applied" to array(ref("effect"), 64), "refreshed" to array(ref("effect"), 64), "stacks_changed" to array(ref("effect"), 64), "expired" to array(ref("effect"), 64),
                 "periodic" to obj(mapOf("every" to duration, "effects" to array(ref("effect"), 64, 1))),
@@ -152,16 +159,16 @@ object CatalogExport {
                     obj(mapOf("type" to mapOf("const" to "attribute"), "attribute" to mapOf("const" to "minecraft:movement_speed"), "amount" to number(0.0, 1.0), "stacking" to mapOf("const" to "capped_add"), "cap" to number(0.0, 1.0))),
                     obj(mapOf("type" to mapOf("const" to "replace"), "target" to obj(mapOf("ability" to localId)),
                         "replacement" to ref("reference"), "priority" to integer(-100, 100)), listOf("type", "target", "replacement")),
+                    obj(mapOf("type" to mapOf("const" to "reflect"), "fraction" to number(0.0, 1.0),
+                        "cap" to number(0.01, 128.0), "damage_type" to text()), listOf("type", "fraction", "cap", "damage_type")),
                 )), 8),
             ), listOf("kind", "id", "duration")),
             "class" to obj(mapOf(
                 "kind" to mapOf("const" to "class"), "id" to text(), "name" to text(),
-                "abilities" to mapOf("type" to "object", "maxProperties" to 128, "propertyNames" to (localId + mapOf("maxLength" to 128)),
-                    "additionalProperties" to mapOf("oneOf" to listOf(
-                        obj(mapOf("ref" to text(), "slot" to (localId + mapOf("maxLength" to 64))), listOf("ref")),
-                        obj(mapOf("definition" to ref("inline_ability"), "slot" to (localId + mapOf("maxLength" to 64))), listOf("definition")),
-                    ))),
+                "abilities" to grantMap,
             )),
+            "specialization" to obj(mapOf("kind" to mapOf("const" to "specialization"), "id" to text(),
+                "name" to text(), "class" to ref("reference"), "abilities" to grantMap)),
             "progression_track" to obj(mapOf(
                 "kind" to mapOf("const" to "progression_track"), "id" to text(), "scope" to enum("player", "class"),
                 "classes" to array(ref("reference"), 128),
@@ -171,10 +178,10 @@ object CatalogExport {
                         "budget" to localId, "amount" to integer(1, 1000))), 16)), listOf("level", "xp")), 128, 1),
                 "cap" to obj(mapOf("level" to integer(1, 128), "overflow" to enum("stop", "bank")), emptyList()),
                 "earn" to mapOf("type" to "object", "maxProperties" to 64, "propertyNames" to localId,
-                    "additionalProperties" to obj(mapOf("event" to enum("entity_death"), "phase" to enum("after"),
+                    "additionalProperties" to obj(mapOf("event" to enum("entity_death", "vanilla_xp"), "phase" to enum("after"),
                         "when" to obj(mapOf("type" to mapOf("const" to "credited_to_owner"))),
                         "amount" to integer(1, 1_000_000), "xp" to integer(1, 1_000_000),
-                        "recipients" to obj(mapOf("type" to enum("actor", "nearby_allies"),
+                        "recipients" to obj(mapOf("type" to enum("actor", "contributors", "nearby_allies"),
                             "range" to number(0.1, 64.0)), listOf("type")),
                         "distribution" to enum("each", "split")), listOf("event"))),
             ), listOf("kind", "id", "scope", "levels")),
@@ -186,6 +193,7 @@ object CatalogExport {
             )),
             "unlock_tree" to obj(mapOf(
                 "kind" to mapOf("const" to "unlock_tree"), "id" to text(), "track" to ref("reference"),
+                "specializations" to array(ref("reference"), 128),
                 "nodes" to mapOf("type" to "object", "minProperties" to 1, "maxProperties" to 128,
                     "propertyNames" to localId,
                     "additionalProperties" to obj(mapOf(
@@ -203,14 +211,14 @@ object CatalogExport {
                                 "slot" to localId), listOf("type", "ref", "grant")),
                         )), 16),
                     ), listOf("selection"))),
-            )),
+            ), listOf("kind", "id", "track", "nodes")),
         )
         return mapOf(
             "\$schema" to "https://json-schema.org/draft/2020-12/schema",
             "title" to "Archetype supported manifest grammar",
             "description" to "Structural editor schema. Run validatePacks for result availability, references, positive intervals, related bounds and recursion. Native registry checks require the server.",
             "\$defs" to definitions,
-            "oneOf" to listOf("pack", "ability", "resource", "state", "area", "status", "projectile", "class", "progression_track", "empowerment", "unlock_tree").map(::ref),
+            "oneOf" to listOf("pack", "ability", "resource", "state", "area", "status", "projectile", "class", "specialization", "progression_track", "empowerment", "unlock_tree").map(::ref),
         )
     }
 

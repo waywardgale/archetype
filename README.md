@@ -12,6 +12,8 @@ Run `./gradlew validatePacks -Ppacks=/absolute/path/to/world/archetype/packs` to
 
 Run `./gradlew exportCatalog` for the supported editor schema and effect reference in `build/catalog/`. [Spatial authoring](docs/spatial-authoring.md) documents shaped selections, chains, fixed fields, and attached areas. [Status authoring](docs/status-authoring.md) documents timed contributions, stacks, periodic effects, area membership buffs, tags, presence conditions, and dispels. Validate the optional fixture pack with `./gradlew validatePacks -Ppacks=src/test/resources/packs/spatial`; it is not installed into worlds automatically.
 
+With your own agreement to the [Minecraft EULA](https://aka.ms/MinecraftEULA), run `./gradlew runGameTest -PacceptMinecraftEulaForTests=true` for focused native server tests. The flag is opt-in and ordinary builds do not record EULA agreement. [Movement authoring](docs/movement-authoring.md) covers dash, push/pull, and safe teleport.
+
 The client uses B to cycle classes, R for the first ability grant, and the bracket keys to change ability pages. Seven more ability keys are available in Controls and start unbound. The current HUD shows the active class, current grant page, cooldowns, and resource amounts.
 The current build also shows grant charges and their next recharge. [Timers and charges](docs/timers-and-charges.md) documents the supported manifest fields and source cleanup rules.
 [Flow authoring](docs/flow-authoring.md) covers bounded condition composition, weighted choices, and parallel joins.
@@ -23,6 +25,7 @@ The current build also shows grant charges and their next recharge. [Timers and 
 [Activation authoring](docs/activation-authoring.md) covers toggles, channels, and charged hold/release input.
 [Form authoring](docs/form-authoring.md) covers timed complete ability replacement and restoration.
 [Progression authoring](docs/progression-authoring.md) covers the current XP, point-award, talent, and empowerment subset.
+[Specialization authoring](docs/specialization-authoring.md) covers class-bound grants, saved choices, and specialization-specific talent trees.
 
 Operators can run `/archetype inspect [online-player-name]` to see the current server generation, active class, resolved grants, resources, declared state, and active statuses, timers, and barriers. `/archetype diagnostics` shows rejected manifest edits.
 

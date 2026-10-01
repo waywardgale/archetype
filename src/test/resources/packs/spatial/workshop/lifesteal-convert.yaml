@@ -1,0 +1,11 @@
+kind: ability
+id: lifesteal_convert
+name: Lifesteal conversion
+target: {type: entity, range: 16}
+effects:
+  - {type: damage, target: target, amount: 8, damage_type: minecraft:magic, as: strike}
+  - {type: heal, target: actor, amount: {expr: 'result.strike.health_lost * 0.5'}, as: leech}
+  - type: branch
+    when: {type: compare, left: {expr: 'result.leech.overheal'}, op: gt, right: 0}
+    then:
+      - {type: shield, target: actor, capacity: {expr: 'result.leech.overheal'}, duration: 5s}

@@ -1,0 +1,5 @@
+kind: status
+id: stun
+duration: 2s
+restrictions: [move, jump, attack, activate]
+control_categories: [stun]

@@ -12,11 +12,19 @@ import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents
 import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking
+import net.fabricmc.fabric.api.event.player.AttackEntityCallback
+import net.fabricmc.fabric.api.event.player.AttackBlockCallback
+import net.fabricmc.fabric.api.event.player.PlayerBlockBreakEvents
 import net.minecraft.commands.Commands
 import net.minecraft.network.chat.Component
 import net.minecraft.server.MinecraftServer
 import net.minecraft.server.level.ServerPlayer
 import net.minecraft.server.permissions.Permissions
+import net.minecraft.world.InteractionResult
+import net.minecraft.world.damagesource.DamageSource
+import net.minecraft.world.entity.Entity
+import net.minecraft.world.entity.OwnableEntity
+import net.minecraft.world.entity.projectile.Projectile
 import net.minecraft.world.level.storage.LevelResource
 import org.slf4j.LoggerFactory
 import java.nio.file.Files
@@ -41,6 +49,17 @@ object ArchetypeMod : ModInitializer {
 
     override fun onInitialize() {
         Packets.register()
+        AttackEntityCallback.EVENT.register { player, level, _, _, _ ->
+            if (!level.isClientSide && CombatBridge.restricted(player.uuid, ActionRestriction.ATTACK))
+                InteractionResult.FAIL else InteractionResult.PASS
+        }
+        AttackBlockCallback.EVENT.register { player, level, _, _, _ ->
+            if (!level.isClientSide && CombatBridge.restricted(player.uuid, ActionRestriction.ATTACK))
+                InteractionResult.FAIL else InteractionResult.PASS
+        }
+        PlayerBlockBreakEvents.BEFORE.register { level, player, _, _, _ ->
+            level.isClientSide || !CombatBridge.restricted(player.uuid, ActionRestriction.ATTACK)
+        }
         ServerLifecycleEvents.SERVER_STARTED.register { server ->
             val root = server.getWorldPath(LevelResource.ROOT).resolve("archetype")
             Files.createDirectories(root.resolve("packs"))
@@ -55,11 +74,14 @@ object ArchetypeMod : ModInitializer {
             } else session?.join(handler.player)
         }
         ServerPlayConnectionEvents.DISCONNECT.register { handler, _ -> session?.leave(handler.player.uuid) }
-        ServerLivingEntityEvents.AFTER_DAMAGE.register { entity, _, _, _, _ -> CombatBridge.committed(entity.uuid, entity.health) }
+        ServerLivingEntityEvents.AFTER_DAMAGE.register { entity, source, _, _, _ ->
+            CombatBridge.committed(entity.uuid, entity.health, creditedPlayer(source), causingEntity(source)?.uuid)
+        }
         ServerLivingEntityEvents.AFTER_DEATH.register { entity, source ->
-            CombatBridge.committed(entity.uuid, entity.health)
+            val owner = creditedPlayer(source)
+            CombatBridge.committed(entity.uuid, entity.health, owner, causingEntity(source)?.uuid)
             session?.runtime?.onDeath(entity.uuid)
-            session?.runtime?.onEntityDeath((source.entity as? ServerPlayer)?.uuid, session?.world?.position(entity.uuid))
+            session?.runtime?.onEntityDeath(owner, session?.world?.position(entity.uuid), entity.uuid)
         }
         ServerPlayNetworking.registerGlobalReceiver(SelectClassPayload.TYPE) { payload, context ->
             context.server().execute {
@@ -70,9 +92,21 @@ object ArchetypeMod : ModInitializer {
                 current.sync(context.player())
             }
         }
+        ServerPlayNetworking.registerGlobalReceiver(SelectSpecializationPayload.TYPE) { payload, context ->
+            context.server().execute {
+                val current = session ?: return@execute
+                if (!current.runtime.selectSpecialization(context.player().uuid, payload.classId, payload.specializationId))
+                    context.player().sendSystemMessage(Component.literal("Archetype: specialization is unavailable"))
+                current.sync(context.player())
+            }
+        }
         ServerPlayNetworking.registerGlobalReceiver(CastPayload.TYPE) { payload, context ->
             context.server().execute {
                 val current = session ?: return@execute
+                if (payload.specializationId != current.runtime.activeSpecialization(context.player().uuid, payload.classId)) {
+                    current.sync(context.player())
+                    return@execute
+                }
                 when (val result = current.runtime.cast(context.player().uuid, payload.classId, payload.grant, payload.target, payload.generation)) {
                     CastResult.Applied -> Unit
                     is CastResult.Rejected -> context.player().sendSystemMessage(Component.literal("Archetype: ${result.reason}"))
@@ -87,6 +121,10 @@ object ArchetypeMod : ModInitializer {
         ServerPlayNetworking.registerGlobalReceiver(ReleasePayload.TYPE) { payload, context ->
             context.server().execute {
                 val current = session ?: return@execute
+                if (payload.specializationId != current.runtime.activeSpecialization(context.player().uuid, payload.classId)) {
+                    current.sync(context.player())
+                    return@execute
+                }
                 when (current.runtime.effectiveAbility(context.player().uuid, payload.classId, payload.grant)?.activation) {
                     Activation.CHARGE -> when (val result = current.runtime.releaseCharge(context.player().uuid, payload.classId,
                         payload.grant, payload.target, payload.generation)) {
@@ -123,6 +161,18 @@ object ArchetypeMod : ModInitializer {
         registerCommands()
     }
 
+    private fun creditedPlayer(source: DamageSource): UUID? {
+        fun resolve(entity: Entity?): UUID? = when (entity) {
+            is ServerPlayer -> entity.uuid
+            is OwnableEntity -> (entity.rootOwner as? ServerPlayer)?.uuid
+            else -> null
+        }
+        return resolve(causingEntity(source))
+    }
+
+    private fun causingEntity(source: DamageSource): Entity? =
+        source.entity ?: (source.directEntity as? Projectile)?.owner
+
     private fun registerCommands() {
         CommandRegistrationCallback.EVENT.register { dispatcher, _, _ ->
             dispatcher.register(
@@ -139,6 +189,20 @@ object ArchetypeMod : ModInitializer {
                             val id = StringArgumentType.getString(ctx, "class")
                             if (!current.runtime.selectClass(player.uuid, id)) {
                                 ctx.source.sendFailure(Component.literal("Unknown class $id"))
+                                0
+                            } else {
+                                current.sync(player)
+                                1
+                            }
+                        }))
+                    .then(Commands.literal("specialize")
+                        .then(Commands.argument("specialization", StringArgumentType.word()).executes { ctx ->
+                            val player = ctx.source.playerOrException
+                            val current = session ?: return@executes 0
+                            val active = current.runtime.record(player.uuid).activeClasses.firstOrNull() ?: return@executes 0
+                            val id = StringArgumentType.getString(ctx, "specialization")
+                            if (!current.runtime.selectSpecialization(player.uuid, active, id)) {
+                                ctx.source.sendFailure(Component.literal("Unavailable specialization $id"))
                                 0
                             } else {
                                 current.sync(player)
@@ -229,15 +293,17 @@ object ArchetypeMod : ModInitializer {
                     diagnostics.forEach { log.warn("Manifest: {}", it) }
                 }
                 is CompileResult.Valid -> {
-                    val allAbilities = result.definitions.abilities.values + result.definitions.classes.values.flatMap { it.grants.values.map { grant -> grant.ability } }
+                    val allAbilities = result.definitions.abilities.values +
+                        result.definitions.classes.values.flatMap { it.grants.values.map { grant -> grant.ability } } +
+                        result.definitions.specializations.values.flatMap { it.grants.values.map { grant -> grant.ability } }
                     val allEffects = allAbilities.flatMap { it.effects } + result.definitions.areas.values.flatMap { it.enter + it.periodic + it.exit + it.expired } + result.definitions.statuses.values.flatMap { it.bodies } + result.definitions.projectiles.values.flatMap { it.bodies }
-                    val unknownTypes = allEffects
+                    val unknownTypes = (allEffects
                         .flatMap { catalog.descendants(it).toList() }
                         .mapNotNull { effect -> when (effect) {
                             is Effect.Damage -> effect.damageType
                             is Effect.Shield -> effect.damageType
                             else -> null
-                        } }
+                        } } + result.definitions.statuses.values.mapNotNull { it.reflect?.damageType })
                         .filterNot(world::supportsDamageType)
                         .distinct()
                     if (unknownTypes.isNotEmpty()) {
@@ -287,6 +353,8 @@ object ArchetypeMod : ModInitializer {
             if (!ServerPlayNetworking.canSend(player, StatePayload.TYPE)) return
             val record = runtime.record(player.uuid)
             val active = record.activeClasses.firstOrNull { it in runtime.definitions.classes }.orEmpty()
+            val specializations = runtime.definitions.specializations.values.filter { it.classId == active }.map { it.id }.take(256)
+            val chosenSpecialization = runtime.activeSpecialization(player.uuid, active)
             val grants = runtime.grantsFor(player.uuid, active).values.filter { runtime.effectiveAbility(player.uuid, active, it.name)?.activation != Activation.PASSIVE }.take(128).map {
                 val effective = runtime.effectiveAbility(player.uuid, active, it.name) ?: it.ability
                 val charges = runtime.chargeState(player.uuid, active, it.name)
@@ -313,7 +381,8 @@ object ArchetypeMod : ModInitializer {
                 TalentNodeView(node.tree, node.node, node.selection == UnlockSelection.AUTOMATIC,
                     node.rank, node.maximum, node.cost, node.points, node.requiredLevel, node.reason)
             }
-            ServerPlayNetworking.send(player, StatePayload(runtime.generation, active, runtime.definitions.classes.keys.take(128), grants, resources, progression, talents))
+            ServerPlayNetworking.send(player, StatePayload(runtime.generation, active, chosenSpecialization,
+                runtime.definitions.classes.keys.take(128), specializations, grants, resources, progression, talents))
         }
 
         fun inspect(player: ServerPlayer): List<String> {

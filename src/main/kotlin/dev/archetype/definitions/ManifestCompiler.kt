@@ -63,6 +63,7 @@ class ManifestCompiler(private val catalog: MechanicCatalog = BuiltinEffects.cat
         val states = linkedMapOf<String, StateDef>()
         val abilities = linkedMapOf<String, AbilityDef>()
         val classes = linkedMapOf<String, ClassDef>()
+        val specializations = linkedMapOf<String, SpecializationDef>()
         val areas = linkedMapOf<String, AreaDef>()
         val statuses = linkedMapOf<String, StatusDef>()
         val projectiles = linkedMapOf<String, ProjectileDef>()
@@ -70,6 +71,7 @@ class ManifestCompiler(private val catalog: MechanicCatalog = BuiltinEffects.cat
         val empowerments = linkedMapOf<String, EmpowermentDef>()
         val unlockTrees = linkedMapOf<String, UnlockTreeDef>()
         val rawClasses = mutableListOf<Pair<Doc, String>>()
+        val rawSpecializations = mutableListOf<Pair<Doc, String>>()
         val usedIds = mutableSetOf<String>()
         for ((doc, packId) in definitions) {
             try {
@@ -88,6 +90,7 @@ class ManifestCompiler(private val catalog: MechanicCatalog = BuiltinEffects.cat
                     "empowerment" -> empowerments[id] = parseEmpowerment(doc.data, id, pack)
                     "unlock_tree" -> unlockTrees[id] = parseUnlockTree(doc.data, id, pack)
                     "class" -> rawClasses += doc to packId
+                    "specialization" -> rawSpecializations += doc to packId
                     else -> bad("kind", "unsupported definition kind $kind")
                 }
             } catch (failure: InvalidManifest) {
@@ -103,7 +106,26 @@ class ManifestCompiler(private val catalog: MechanicCatalog = BuiltinEffects.cat
                 errors += Diagnostic(doc.file, failure.field, failure.message ?: "invalid manifest")
             }
         }
+        for ((doc, packId) in rawSpecializations) {
+            try {
+                val pack = packs.getValue(packId)
+                val id = qualify(doc.data.string("id", "$"), packId, pack, "id")
+                val classId = reference(doc.data["class"], pack, "class")
+                if (classId !in classes) bad("class", "unknown class $classId")
+                doc.data.only(setOf("kind", "id", "name", "class", "abilities"), "$")
+                val parsed = parseClass(doc.data.filterKeys { it != "class" }, id, pack, abilities)
+                val base = classes.getValue(classId).grants
+                for (name in parsed.grants.keys) if (name in base)
+                    bad("abilities.$name", "specialization grant conflicts with base class grant")
+                specializations[id] = SpecializationDef(id, parsed.name, classId, parsed.grants)
+            } catch (failure: InvalidManifest) {
+                errors += Diagnostic(doc.file, failure.field, failure.message ?: "invalid manifest")
+            }
+        }
         if (classes.size > 128) errors += Diagnostic("packs", "classes", "at most 128 classes are supported")
+        if (specializations.size > 256) errors += Diagnostic("packs", "specializations", "at most 256 specializations are supported")
+        for ((id, spec) in specializations) if (spec.grants.size + classes.getValue(spec.classId).grants.size > 128)
+            errors += Diagnostic(id, "abilities", "at most 128 class and specialization grants are supported")
         if (resources.size > 128) errors += Diagnostic("packs", "resources", "at most 128 resources are supported")
         if (states.size > 128) errors += Diagnostic("packs", "states", "at most 128 state definitions are supported")
         if (areas.size > 256) errors += Diagnostic("packs", "areas", "at most 256 areas are supported")
@@ -115,6 +137,7 @@ class ManifestCompiler(private val catalog: MechanicCatalog = BuiltinEffects.cat
             if (replacement.replacement !in abilities)
                 errors += Diagnostic(id, "modifiers.replacement", "unknown ability ${replacement.replacement}")
             if (classes.values.none { replacement.grant in it.grants } &&
+                specializations.values.none { replacement.grant in it.grants } &&
                 unlockTrees.values.none { tree -> tree.nodes.values.any { node -> node.abilities.any { it.grant == replacement.grant } } })
                 errors += Diagnostic(id, "modifiers.target.ability", "unknown grant ${replacement.grant}")
             val pack = packs[id.substringBefore(':')]
@@ -146,13 +169,25 @@ class ManifestCompiler(private val catalog: MechanicCatalog = BuiltinEffects.cat
         if (unlockTrees.size > 128) errors += Diagnostic("packs", "unlock_trees", "at most 128 unlock trees are supported")
         for ((id, tree) in unlockTrees) {
             if (tree.track !in progressionTracks) errors += Diagnostic(id, "track", "unknown progression track ${tree.track}")
+            for (specialization in tree.specializations) {
+                val definition = specializations[specialization]
+                if (definition == null) errors += Diagnostic(id, "specializations", "unknown specialization $specialization")
+                else if (progressionTracks[tree.track]?.let { track -> track.scope != ProgressScope.CLASS ||
+                        (if (track.classes.isEmpty()) definition.classId.substringBefore(':') != track.id.substringBefore(':')
+                        else definition.classId !in track.classes) } == true)
+                    errors += Diagnostic(id, "specializations", "specialization $specialization cannot use this track")
+            }
+            if (tree.specializations.isNotEmpty() && progressionTracks[tree.track]?.scope == ProgressScope.PLAYER)
+                errors += Diagnostic(id, "specializations", "specialization trees require a class-scoped track")
             for (node in tree.nodes.values) for (empowerment in node.empowerments)
                 if (empowerment !in empowerments) errors += Diagnostic(id, "nodes.${node.id}.grants", "unknown empowerment $empowerment")
         }
-        val unlockedByClass = mutableMapOf<String, MutableMap<String, String>>()
+        data class UnlockClaim(val source: String, val specializations: Set<String>)
+        val unlockedByClass = mutableMapOf<String, MutableMap<String, MutableList<UnlockClaim>>>()
         for ((id, tree) in unlockTrees) {
             val track = progressionTracks[tree.track] ?: continue
-            val eligibleClasses = if (track.scope != ProgressScope.CLASS) classes.keys
+            val eligibleClasses = if (tree.specializations.isNotEmpty()) tree.specializations.mapNotNull { specializations[it]?.classId }.distinct()
+                else if (track.scope != ProgressScope.CLASS) classes.keys
                 else if (track.classes.isNotEmpty()) track.classes
                 else classes.keys.filter { it.substringBefore(':') == track.id.substringBefore(':') }
             for (node in tree.nodes.values) for (unlock in node.abilities) {
@@ -160,11 +195,20 @@ class ManifestCompiler(private val catalog: MechanicCatalog = BuiltinEffects.cat
                     errors += Diagnostic(id, "nodes.${node.id}.grants", "unknown ability ${unlock.ability}")
                 for (classId in eligibleClasses) {
                     val classDef = classes[classId] ?: continue
-                    if (unlock.grant in classDef.grants)
+                    if (unlock.grant in classDef.grants || specializations.values.any {
+                            it.classId == classId && unlock.grant in it.grants &&
+                                (tree.specializations.isEmpty() || it.id in tree.specializations)
+                        })
                         errors += Diagnostic(id, "nodes.${node.id}.grants", "grant ${unlock.grant} already exists in $classId")
-                    val previous = unlockedByClass.getOrPut(classId) { mutableMapOf() }.putIfAbsent(unlock.grant, "$id/${node.id}")
+                    val claims = unlockedByClass.getOrPut(classId) { mutableMapOf() }
+                        .getOrPut(unlock.grant) { mutableListOf() }
+                    val previous = claims.firstOrNull { existing ->
+                        existing.specializations.isEmpty() || tree.specializations.isEmpty() ||
+                            existing.specializations.any { it in tree.specializations }
+                    }
                     if (previous != null)
-                        errors += Diagnostic(id, "nodes.${node.id}.grants", "grant ${unlock.grant} conflicts with $previous in $classId")
+                        errors += Diagnostic(id, "nodes.${node.id}.grants", "grant ${unlock.grant} conflicts with ${previous.source} in $classId")
+                    claims += UnlockClaim("$id/${node.id}", tree.specializations)
                 }
             }
         }
@@ -174,13 +218,15 @@ class ManifestCompiler(private val catalog: MechanicCatalog = BuiltinEffects.cat
         for ((id, empowerment) in empowerments) for (replacement in empowerment.replacements) {
             if (replacement.replacement !in abilities) errors += Diagnostic(id, "changes.replacement", "unknown ability ${replacement.replacement}")
             if (classes.values.none { replacement.grant in it.grants } &&
+                specializations.values.none { replacement.grant in it.grants } &&
                 unlockTrees.values.none { tree -> tree.nodes.values.any { node -> node.abilities.any { it.grant == replacement.grant } } })
                 errors += Diagnostic(id, "changes.target.ability", "unknown grant ${replacement.grant}")
         }
         // ASVS 2.2.3: one attribute must have one unambiguous composition policy across packs.
         if (statuses.values.mapNotNull { it.speed }.map { it.combination to it.cap }.distinct().size > 1)
             errors += Diagnostic("packs", "statuses.modifiers", "movement speed modifiers must use the same stacking policy and cap")
-        for ((id, ability) in abilities + classes.values.flatMap { it.grants.values }.associate { it.ability.id to it.ability }) {
+        val authoredGrants = classes.values.flatMap { it.grants.values } + specializations.values.flatMap { it.grants.values }
+        for ((id, ability) in abilities + authoredGrants.associate { it.ability.id to it.ability }) {
             val pack = packs[id.substringBefore(':')] ?: continue
             for (cost in ability.costs) {
                 if (cost.resource !in resources) errors += Diagnostic(id, "costs", "unknown resource ${cost.resource}")
@@ -192,22 +238,28 @@ class ManifestCompiler(private val catalog: MechanicCatalog = BuiltinEffects.cat
                     errors += Diagnostic(id, "activation.periodic_costs", "undeclared pack dependency")
             }
         }
-        val bodies = abilities.mapValues { it.value.effects + it.value.recastEffects } + classes.values.flatMap { it.grants.values }.associate { it.ability.id to it.ability.effects + it.ability.recastEffects } +
+        val bodies = abilities.mapValues { it.value.effects + it.value.recastEffects } + authoredGrants.associate { it.ability.id to it.ability.effects + it.ability.recastEffects } +
             areas.mapValues { (_, area) -> area.enter + area.periodic + area.exit + area.expired } + statuses.mapValues { it.value.bodies } +
             projectiles.mapValues { it.value.bodies }
-        val declaredGroups = (abilities.values + classes.values.flatMap { it.grants.values.map(Grant::ability) }).flatMap { it.cooldownGroups }.toSet()
+        val declaredGroups = (abilities.values + authoredGrants.map(Grant::ability)).flatMap { it.cooldownGroups }.toSet()
         for ((id, effects) in bodies) for (effect in effects.flatMap { catalog.descendants(it).toList() }) {
             if (effect is Effect.ReduceGroupCooldown && effect.group !in declaredGroups)
                 errors += Diagnostic(id, "effects.group", "unknown cooldown group ${effect.group}")
+            if (effect is Effect.Dash && effect.distance is Numeric.Constant && effect.distance.value !in 0.01..32.0)
+                errors += Diagnostic(id, "effects.distance", "dash distance must be 0.01..32 blocks")
+            if (effect is Effect.Impulse && effect.distance is Numeric.Constant && effect.distance.value !in 0.01..32.0)
+                errors += Diagnostic(id, "effects.distance", "impulse distance must be 0.01..32 blocks")
         }
-        for ((classId, classDef) in classes) for ((grantName, grant) in classDef.grants) {
+        val grantContexts = classes.map { (id, definition) -> id to definition.grants } +
+            specializations.values.map { spec -> spec.id to (classes.getValue(spec.classId).grants + spec.grants) }
+        for ((classId, grants) in grantContexts) for ((grantName, grant) in grants) {
             // ASVS 2.2.2, 2.2.3: resolve named grant edits against each actual granting class, including controller callbacks.
             val visited = mutableSetOf<String>()
             val reported = mutableSetOf<String>()
             fun visit(effects: List<Effect>) {
                 for (effect in effects.flatMap { catalog.descendants(it).toList() }) {
                     val mechanic = catalog.mechanic(effect)
-                    for (ref in mechanic.grants(effect)) if (ref != "self" && ref !in classDef.grants && reported.add(ref))
+                    for (ref in mechanic.grants(effect)) if (ref != "self" && ref !in grants && reported.add(ref))
                         errors += Diagnostic("$classId/$grantName", "effects.grant", "unknown logical grant $ref")
                     for (ref in mechanic.areas(effect)) if (visited.add("area:$ref")) areas[ref]?.let { area ->
                         visit(area.enter + area.periodic + area.exit + area.expired)
@@ -346,7 +398,7 @@ class ManifestCompiler(private val catalog: MechanicCatalog = BuiltinEffects.cat
         }
         (areas.keys + statuses.keys + projectiles.keys).forEach(::visitController)
         if (errors.isNotEmpty()) return CompileResult.Invalid(errors)
-        return CompileResult.Valid(DefinitionSet(packs, resources, abilities, classes, snapshot.fingerprint, areas, statuses, states, projectiles, progressionTracks, empowerments, unlockTrees))
+        return CompileResult.Valid(DefinitionSet(packs, resources, abilities, classes, snapshot.fingerprint, areas, statuses, states, projectiles, progressionTracks, empowerments, unlockTrees, specializations))
     }
 
     private fun parsePack(doc: Doc): Pack {
@@ -719,8 +771,13 @@ class ManifestCompiler(private val catalog: MechanicCatalog = BuiltinEffects.cat
     }
 
     private fun parseUnlockTree(m: Map<String, Any?>, id: String, pack: Pack): UnlockTreeDef {
-        m.only(setOf("kind", "id", "track", "nodes"), "$")
+        m.only(setOf("kind", "id", "track", "specializations", "nodes"), "$")
         val track = reference(m["track"], pack, "track")
+        val specializations = m.listOrEmpty("specializations", "$").mapIndexed { index, value ->
+            reference(value, pack, "specializations[$index]")
+        }
+        if (specializations.size > 128 || specializations.distinct().size != specializations.size)
+            bad("specializations", "at most 128 distinct specializations are supported")
         val rawNodes = m["nodes"].asMap("nodes", "nodes")
         if (rawNodes.size !in 1..128) bad("nodes", "unlock tree needs 1..128 nodes")
         val nodes = rawNodes.map { (name, raw) ->
@@ -798,7 +855,7 @@ class ManifestCompiler(private val catalog: MechanicCatalog = BuiltinEffects.cat
         }
         val visited = mutableSetOf<String>()
         nodes.keys.forEach { visit(it, mutableSetOf(), visited) }
-        return UnlockTreeDef(id, track, nodes)
+        return UnlockTreeDef(id, track, nodes, specializations.toSet())
     }
 
     private fun parseProgressionTrack(m: Map<String, Any?>, id: String, pack: Pack): ProgressionTrackDef {
@@ -861,9 +918,12 @@ class ManifestCompiler(private val catalog: MechanicCatalog = BuiltinEffects.cat
             rule.only(setOf("event", "phase", "when", "amount", "xp", "recipients", "distribution"), field)
             val event = when (rule.string("event", field)) {
                 "entity_death" -> ProgressEvent.ENTITY_DEATH
+                "vanilla_xp" -> ProgressEvent.VANILLA_XP
                 else -> bad("$field.event", "unsupported progression event")
             }
             if (rule["phase"] != null && rule.string("phase", field) != "after") bad("$field.phase", "progression awards require the after phase")
+            if (event == ProgressEvent.VANILLA_XP && "when" in rule)
+                bad("$field.when", "vanilla XP has no credited kill source")
             rule["when"]?.asMap("$field.when", "$field.when")?.let { condition ->
                 condition.only(setOf("type"), "$field.when")
                 if (condition.string("type", "$field.when") != "credited_to_owner")
@@ -876,13 +936,14 @@ class ManifestCompiler(private val catalog: MechanicCatalog = BuiltinEffects.cat
             recipients?.only(setOf("type", "range"), "$field.recipients")
             val recipientType = when (recipients?.string("type", "$field.recipients") ?: "actor") {
                 "actor" -> ProgressRecipients.ACTOR
+                "contributors" -> ProgressRecipients.CONTRIBUTORS
                 "nearby_allies" -> ProgressRecipients.NEARBY_ALLIES
-                else -> bad("$field.recipients.type", "supported recipients are actor and nearby_allies")
+                else -> bad("$field.recipients.type", "supported recipients are actor, contributors, and nearby_allies")
             }
             val range = if (recipientType == ProgressRecipients.NEARBY_ALLIES) {
                 boundedNumber(recipients!!, "range", "$field.recipients", 0.1, 64.0)
             } else {
-                if (recipients?.containsKey("range") == true) bad("$field.recipients.range", "actor recipients do not use range")
+                if (recipients?.containsKey("range") == true) bad("$field.recipients.range", "only nearby_allies recipients use range")
                 0.0
             }
             val distribution = when (rule["distribution"] ?: "each") {
@@ -890,6 +951,11 @@ class ManifestCompiler(private val catalog: MechanicCatalog = BuiltinEffects.cat
                 "split" -> ProgressDistribution.SPLIT
                 else -> bad("$field.distribution", "distribution must be each or split")
             }
+            if (recipientType == ProgressRecipients.CONTRIBUTORS && "when" in rule)
+                bad("$field.when", "contributor rewards do not use a single credited-killer condition")
+            if (event == ProgressEvent.VANILLA_XP &&
+                (recipientType != ProgressRecipients.ACTOR || distribution != ProgressDistribution.EACH))
+                bad(field, "vanilla XP must award only its recipient")
             EarningRule(name, event, xp, recipientType, range, distribution)
         }
         return ProgressionTrackDef(id, scope, levels, capLevel, bankOverflow, rules, classes.toSet())
@@ -933,6 +999,7 @@ class ManifestCompiler(private val catalog: MechanicCatalog = BuiltinEffects.cat
         val modifiers = m.listOrEmpty("modifiers", "$")
         if (modifiers.size > 8) bad("modifiers", "at most 8 modifiers are supported")
         var speed: SpeedBonus? = null
+        var reflect: ReflectPolicy? = null
         val replacements = mutableListOf<AbilityReplacement>()
         for ((index, raw) in modifiers.withIndex()) {
             val field = "modifiers[$index]"
@@ -965,15 +1032,32 @@ class ManifestCompiler(private val catalog: MechanicCatalog = BuiltinEffects.cat
                         .also { if (it !in -100..100) bad("$field.priority", "priority must be -100..100") }
                     replacements += AbilityReplacement(grant, replacement, priority)
                 }
+                "reflect" -> {
+                    if (reflect != null) bad(field, "one reflection policy is supported")
+                    modifier.only(setOf("type", "fraction", "cap", "damage_type"), field)
+                    val fraction = boundedNumber(modifier, "fraction", field, 0.0, 1.0)
+                    if (fraction <= 0.0) bad("$field.fraction", "reflection fraction must be positive")
+                    val cap = boundedNumber(modifier, "cap", field, 0.01, 128.0)
+                    val damageType = modifier.string("damage_type", field)
+                    if (damageType.length > 128 || !GLOBAL_ID.matches(damageType))
+                        bad("$field.damage_type", "invalid native damage type")
+                    reflect = ReflectPolicy(fraction, cap, damageType)
+                }
                 else -> bad("$field.type", "unsupported modifier type")
             }
         }
         val restrictions = m.listOrEmpty("restrictions", "$")
-        if (restrictions.size > 1) bad("restrictions", "only one activation restriction is supported")
+        if (restrictions.size > 4) bad("restrictions", "at most four distinct restrictions are supported")
         val actions = restrictions.mapIndexed { index, value ->
-            if (value.asString("restrictions[$index]") != "activate") bad("restrictions[$index]", "supported restriction is activate")
-            ActionRestriction.ACTIVATE
+            when (value.asString("restrictions[$index]")) {
+                "activate" -> ActionRestriction.ACTIVATE
+                "move" -> ActionRestriction.MOVE
+                "jump" -> ActionRestriction.JUMP
+                "attack" -> ActionRestriction.ATTACK
+                else -> bad("restrictions[$index]", "supported restrictions are activate, move, jump, attack")
+            }
         }.toSet()
+        if (actions.size != restrictions.size) bad("restrictions", "duplicate restriction")
         val controlCategories = statusLabels(m, "control_categories", pack, "$")
         val immunities = statusLabels(m, "immunities", pack, "$")
         if (controlCategories.any { it in immunities }) bad("immunities", "a status cannot be immune to its own control category")
@@ -983,7 +1067,7 @@ class ManifestCompiler(private val catalog: MechanicCatalog = BuiltinEffects.cat
         }
         if (breakOnHealthLoss == null && callbacks.getValue("broken").isNotEmpty()) bad("broken", "broken callback requires break_on_damage")
         return StatusDef(id, duration, stacks, interval, periodic, callbacks.getValue("applied"), callbacks.getValue("refreshed"), callbacks.getValue("stacks_changed"), callbacks.getValue("expired"), speed, statusTags(m, pack, "$"), actions, controlCategories, immunities, breakOnHealthLoss, callbacks.getValue("broken"),
-            m["state"]?.let { reference(it, pack, "state") }, replacements)
+            m["state"]?.let { reference(it, pack, "state") }, replacements, reflect)
     }
 
     private fun validateContexts(effects: List<Effect>, entity: Boolean, position: Boolean, field: String) {
@@ -1226,6 +1310,8 @@ class ManifestCompiler(private val catalog: MechanicCatalog = BuiltinEffects.cat
         var relation = Relation.ANY
         var minimumHealth = 0.0
         var maximumHealth = 1.0
+        var maximumFacingAngle: Double? = null
+        var entityType: String? = null
         val seen = mutableSetOf<String>()
         val filters = m.listOrEmpty("filters", field)
         if (filters.size > 8) bad("$field.filters", "at most 8 filters are supported")
@@ -1251,6 +1337,16 @@ class ManifestCompiler(private val catalog: MechanicCatalog = BuiltinEffects.cat
                     maximumHealth = boundedNumber(filter, "max", path, 0.0, 1.0, 1.0)
                     if (minimumHealth > maximumHealth) bad(path, "health minimum exceeds maximum")
                 }
+                "facing_origin" -> {
+                    filter.only(setOf("type", "max_degrees"), path)
+                    maximumFacingAngle = boundedNumber(filter, "max_degrees", path, 0.0, 180.0, 45.0)
+                }
+                "entity_type" -> {
+                    filter.only(setOf("type", "id"), path)
+                    entityType = filter.string("id", path).also {
+                        if (it.length > 128 || !GLOBAL_ID.matches(it)) bad("$path.id", "invalid entity type ID")
+                    }
+                }
                 else -> bad("$path.type", "unsupported selector filter")
             }
         }
@@ -1262,7 +1358,7 @@ class ManifestCompiler(private val catalog: MechanicCatalog = BuiltinEffects.cat
             "random" -> TargetOrder.RANDOM
             else -> bad("$field.order", "unsupported target order")
         }
-        return Selector(shape, limit, relation, booleanValue(m, "line_of_sight", field, true), booleanValue(m, "include_actor", field, false), order, minimumHealth, maximumHealth)
+        return Selector(shape, limit, relation, booleanValue(m, "line_of_sight", field, true), booleanValue(m, "include_actor", field, false), order, minimumHealth, maximumHealth, maximumFacingAngle, entityType)
     }
 
     private fun nestedEffects(

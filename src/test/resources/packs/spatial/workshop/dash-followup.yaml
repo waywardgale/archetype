@@ -1,0 +1,16 @@
+kind: ability
+id: dash_followup
+name: Dash follow-up
+target: {type: entity, range: 16}
+effects:
+  - type: dash
+    direction: actor.aim
+    distance: 8
+    as: motion
+  - type: delay
+    duration: 100ms
+    effects:
+      - type: damage
+        target: target
+        amount: {expr: '2 + result.motion.travelled'}
+        damage_type: minecraft:magic

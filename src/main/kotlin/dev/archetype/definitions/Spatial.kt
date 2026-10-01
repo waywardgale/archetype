@@ -77,8 +77,11 @@ data class Selector(
     val order: TargetOrder = TargetOrder.NEAREST,
     val minimumHealth: Double = 0.0,
     val maximumHealth: Double = 1.0,
+    val maximumFacingAngle: Double? = null,
+    val entityType: String? = null,
 )
-data class EntityView(val id: UUID, val position: Position, val health: Double, val maximumHealth: Double, val ally: Boolean)
+data class EntityView(val id: UUID, val position: Position, val health: Double, val maximumHealth: Double, val ally: Boolean,
+    val typeId: String? = null)
 
 sealed interface Anchor {
     data class Fixed(val position: SpatialTarget) : Anchor

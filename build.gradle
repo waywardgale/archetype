@@ -26,6 +26,20 @@ kotlin { jvmToolchain(25) }
 
 tasks.withType(Test).configureEach { useJUnitPlatform() }
 
+// This flag is an explicit local acceptance of the Minecraft EULA for native game tests.
+// Ordinary builds do not create a game-test run or record agreement on behalf of contributors.
+if (providers.gradleProperty('acceptMinecraftEulaForTests').orElse('false').get() == 'true') {
+    fabricApi {
+        configureTests {
+            createSourceSet = true
+            modId = 'archetype-gametest'
+            enableGameTests = true
+            enableClientGameTests = false
+            eula = true
+        }
+    }
+}
+
 jar {
     from('LICENSE') { rename { 'LICENSE_archetype' } }
 }

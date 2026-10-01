@@ -46,6 +46,11 @@ interface Effect {
     val resultName: String?
     data class Heal(val target: EffectTarget, val amount: Numeric, override val resultName: String?) : Effect
     data class Damage(val target: EffectTarget, val amount: Numeric, val damageType: String, override val resultName: String?) : Effect
+    data class Dash(val direction: DashDirection, val distance: Numeric, override val resultName: String?) : Effect
+    data class Impulse(val target: EffectTarget, val direction: ImpulseDirection, val distance: Numeric,
+        override val resultName: String?) : Effect
+    data class SafeTeleport(val target: EffectTarget, val destination: SpatialTarget,
+        override val resultName: String?) : Effect
     data class ReadHealth(val target: EffectTarget, override val resultName: String?) : Effect
     data class Shield(
         val target: EffectTarget, val capacity: Numeric, val durationTicks: Int, val priority: Int,
@@ -125,6 +130,8 @@ enum class Activation { ACTIVATED, PASSIVE, TOGGLE, CHANNEL, CHARGE, CONFIRM, RE
 enum class RechargeMode { SEQUENTIAL, PARALLEL }
 enum class RechargeSelection { EARLIEST, LATEST, ALL }
 enum class ProjectileDirection { AIM, TARGET, GROUND }
+enum class DashDirection { AIM, TARGET, GROUND }
+enum class ImpulseDirection { AWAY, TOWARD }
 enum class ProjectileEntities { ENEMIES, ALLIES, ANY }
 enum class ProjectileEvent { ENTITY_HIT, BLOCK_HIT, EXPIRY }
 data class NumberParameter(val minimum: Double, val maximum: Double, val default: Double?)
@@ -173,10 +180,11 @@ data class AreaDef(
 )
 
 enum class StackDuration { SHARED, PER_STACK }
-enum class ActionRestriction { ACTIVATE }
+enum class ActionRestriction { ACTIVATE, MOVE, JUMP, ATTACK }
 data class StatusStacks(val maximum: Int, val duration: StackDuration)
 enum class BonusCombination { STRONGEST, CAPPED_ADD }
 data class SpeedBonus(val amount: Double, val combination: BonusCombination, val cap: Double?)
+data class ReflectPolicy(val fraction: Double, val cap: Double, val damageType: String)
 data class AbilityReplacement(val grant: String, val replacement: String, val priority: Int)
 data class StatusDef(
     val id: String, val durationTicks: Int, val stacks: StatusStacks?,
@@ -191,16 +199,18 @@ data class StatusDef(
     val broken: List<Effect> = emptyList(),
     val state: String? = null,
     val replacements: List<AbilityReplacement> = emptyList(),
+    val reflect: ReflectPolicy? = null,
 ) {
     val bodies: List<Effect> get() = applied + refreshed + stacksChanged + periodic + expired + broken
 }
 
 data class Grant(val name: String, val slot: String?, val ability: AbilityDef)
 data class ClassDef(val id: String, val name: String, val grants: Map<String, Grant>)
+data class SpecializationDef(val id: String, val name: String, val classId: String, val grants: Map<String, Grant>)
 
 enum class ProgressScope { PLAYER, CLASS }
-enum class ProgressEvent { ENTITY_DEATH }
-enum class ProgressRecipients { ACTOR, NEARBY_ALLIES }
+enum class ProgressEvent { ENTITY_DEATH, VANILLA_XP }
+enum class ProgressRecipients { ACTOR, CONTRIBUTORS, NEARBY_ALLIES }
 enum class ProgressDistribution { EACH, SPLIT }
 data class PointAward(val id: String, val budget: String, val amount: Int)
 data class ProgressLevel(val level: Int, val xp: Long, val awards: List<PointAward>)
@@ -217,7 +227,8 @@ data class AbilityUnlock(val grant: String, val ability: String, val slot: Strin
 data class UnlockNode(val id: String, val selection: UnlockSelection, val requiredLevel: Int,
     val prerequisites: Set<String>, val ranks: Int, val choiceGroup: String?, val cost: PointCost?,
     val empowerments: List<String>, val abilities: List<AbilityUnlock> = emptyList())
-data class UnlockTreeDef(val id: String, val track: String, val nodes: Map<String, UnlockNode>)
+data class UnlockTreeDef(val id: String, val track: String, val nodes: Map<String, UnlockNode>,
+    val specializations: Set<String> = emptySet())
 
 data class DefinitionSet(
     val packs: Map<String, Pack>,
@@ -232,6 +243,7 @@ data class DefinitionSet(
     val progressionTracks: Map<String, ProgressionTrackDef> = emptyMap(),
     val empowerments: Map<String, EmpowermentDef> = emptyMap(),
     val unlockTrees: Map<String, UnlockTreeDef> = emptyMap(),
+    val specializations: Map<String, SpecializationDef> = emptyMap(),
 )
 
 sealed interface CompileResult {

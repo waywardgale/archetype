@@ -13,3 +13,4 @@ levels:
 cap: {level: 2, overflow: bank}
 earn:
   credited_defeat: {event: entity_death, xp: 10}
+  gathered_xp: {event: vanilla_xp, amount: 2}

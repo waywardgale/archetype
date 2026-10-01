@@ -1,0 +1,6 @@
+kind: specialization
+id: validation_variant
+name: Validation variant
+class: {ref: validation_actor}
+abilities:
+  variant_dash: {ref: dash_followup, slot: variant_dash}

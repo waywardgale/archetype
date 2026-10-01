@@ -2,13 +2,16 @@ package dev.archetype.minecraft
 
 import dev.archetype.runtime.WorldOps
 import dev.archetype.runtime.ProjectileContact
+import dev.archetype.runtime.MotionResult
 import dev.archetype.definitions.ProjectileEntities
 import dev.archetype.definitions.EntityView
 import dev.archetype.definitions.Position
 import dev.archetype.definitions.Vec
 import net.minecraft.core.BlockPos
+import net.minecraft.core.Direction
 import net.minecraft.core.particles.ParticleTypes
 import net.minecraft.core.registries.Registries
+import net.minecraft.core.registries.BuiltInRegistries
 import net.minecraft.resources.Identifier
 import net.minecraft.resources.ResourceKey
 import net.minecraft.server.MinecraftServer
@@ -17,6 +20,7 @@ import net.minecraft.server.level.ServerLevel
 import net.minecraft.world.damagesource.DamageSource
 import net.minecraft.world.damagesource.DamageType
 import net.minecraft.world.entity.LivingEntity
+import net.minecraft.world.entity.MoverType
 import net.minecraft.world.entity.ai.attributes.AttributeModifier
 import net.minecraft.world.entity.ai.attributes.Attributes
 import net.minecraft.world.entity.projectile.ProjectileUtil
@@ -59,6 +63,58 @@ class MinecraftWorldOps(private val server: MinecraftServer) : WorldOps {
     }
 
     override fun direction(entity: UUID): Vec = entity(entity)?.lookAngle?.vector() ?: Vec(0.0, 0.0, 1.0)
+
+    override fun displace(entity: UUID, direction: Vec, distance: Double): MotionResult? {
+        val subject = entity(entity) ?: return null
+        if (!subject.isAlive || !direction.finite() || direction.lengthSquared() !in 0.999..1.001 ||
+            !distance.isFinite() || distance !in 0.01..32.0) return null
+        val start = subject.position()
+        val requested = Vec3(direction.x * distance, direction.y * distance, direction.z * distance)
+        val level = subject.level()
+        // Include the whole body for wide entities and its swept path before invoking native collision.
+        val path = subject.boundingBox.expandTowards(requested).inflate(0.1)
+        val minX = BlockPos.containing(path.minX, 0.0, 0.0).x shr 4
+        val maxX = BlockPos.containing(path.maxX, 0.0, 0.0).x shr 4
+        val minZ = BlockPos.containing(0.0, 0.0, path.minZ).z shr 4
+        val maxZ = BlockPos.containing(0.0, 0.0, path.maxZ).z shr 4
+        if (maxX - minX > 8 || maxZ - minZ > 8) return null
+        for (chunkX in minX..maxX) for (chunkZ in minZ..maxZ)
+            if (level.chunkSource.getChunkNow(chunkX, chunkZ) == null) return null
+        subject.move(MoverType.SELF, requested)
+        val actual = subject.position().subtract(start)
+        // Project onto the requested direction; native step-up can add vertical distance without extending the dash.
+        val travelled = (actual.x * direction.x + actual.y * direction.y + actual.z * direction.z)
+            .coerceIn(0.0, distance)
+        if (subject is ServerPlayer) subject.teleportTo(subject.x, subject.y, subject.z)
+        return MotionResult(travelled, travelled < distance - 0.01)
+    }
+
+    override fun safeTeleport(entity: UUID, destination: Position): Boolean? {
+        val subject = entity(entity) ?: return null
+        if (!subject.isAlive || subject.level().dimension().identifier().toString() != destination.dimension ||
+            !destination.value.finite()) return null
+        val level = subject.level()
+        val current = subject.position()
+        val point = Vec3(destination.value.x, destination.value.y, destination.value.z)
+        if (current.distanceToSqr(point) > 32.0 * 32.0) return null
+        val bounds = subject.boundingBox.move(point.subtract(current))
+        val minX = BlockPos.containing(bounds.minX, 0.0, 0.0).x shr 4
+        val maxX = BlockPos.containing(bounds.maxX, 0.0, 0.0).x shr 4
+        val minZ = BlockPos.containing(0.0, 0.0, bounds.minZ).z shr 4
+        val maxZ = BlockPos.containing(0.0, 0.0, bounds.maxZ).z shr 4
+        if (maxX - minX > 8 || maxZ - minZ > 8) return null
+        for (chunkX in minX..maxX) for (chunkZ in minZ..maxZ)
+            if (level.chunkSource.getChunkNow(chunkX, chunkZ) == null) return null
+        val below = BlockPos.containing(point.x, point.y - 0.1, point.z)
+        val feet = BlockPos.containing(point)
+        val head = BlockPos.containing(point.x, point.y + 1.0, point.z)
+        if (level.isOutsideBuildHeight(below) || !level.worldBorder.isWithinBounds(bounds) ||
+            !level.getBlockState(below).isFaceSturdy(level, below, Direction.UP) ||
+            !level.getBlockState(feet).isAir || !level.getBlockState(head).isAir ||
+            !level.noCollision(subject, bounds)) return false
+        subject.teleportTo(point.x, point.y, point.z)
+        return true
+    }
 
     override fun projectileOrigin(actor: UUID): Position? = server.playerList.getPlayer(actor)?.let { player ->
         Position(player.level().dimension().identifier().toString(), player.eyePosition.vector())
@@ -170,6 +226,7 @@ class MinecraftWorldOps(private val server: MinecraftServer) : WorldOps {
     private fun view(player: ServerPlayer, entity: LivingEntity) = EntityView(
         entity.uuid, Position(entity.level().dimension().identifier().toString(), entity.position().vector()), entity.health.toDouble(), entity.maxHealth.toDouble(),
         entity.uuid == player.uuid || entity is ServerPlayer || player.isAlliedTo(entity),
+        BuiltInRegistries.ENTITY_TYPE.getKey(entity.type).toString(),
     )
 
     override fun lineOfSight(origin: Position, target: UUID): Boolean {

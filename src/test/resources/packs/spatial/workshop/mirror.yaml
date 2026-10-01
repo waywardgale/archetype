@@ -1,0 +1,5 @@
+kind: status
+id: mirror
+duration: 5s
+modifiers:
+  - {type: reflect, fraction: 0.25, cap: 8, damage_type: minecraft:magic}

@@ -8,7 +8,7 @@ effects:
       type: living_entities
       shape: {type: beam, length: 12, radius: 0.5}
       limit: 8
-      filters: [{type: relation, is: enemy}]
+      filters: [{type: relation, is: enemy}, {type: facing_origin, max_degrees: 60}, {type: entity_type, id: minecraft:pig}]
     effects:
       - type: damage
         target: target

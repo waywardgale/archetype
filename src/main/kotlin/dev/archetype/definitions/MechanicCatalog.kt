@@ -87,6 +87,9 @@ interface EffectReader {
 interface EffectExecution {
     fun heal(target: EffectTarget, amount: Numeric): Healing?
     fun damage(target: EffectTarget, amount: Numeric, damageType: String): Double?
+    fun dash(effect: Effect.Dash): Map<String, Double>?
+    fun impulse(effect: Effect.Impulse): Map<String, Double>?
+    fun safeTeleport(effect: Effect.SafeTeleport): Map<String, Double>?
     fun readHealth(target: EffectTarget): Map<String, Double>?
     fun shield(effect: Effect.Shield): Map<String, Double>?
     fun resource(id: String, amount: Numeric, spend: Boolean): Double
@@ -365,6 +368,43 @@ object BuiltinEffects {
             numericInputs = { mapOf("amount" to it.amount) }, requiresTarget = { it.target == EffectTarget.TARGET },
             decode = { Effect.Damage(it.target("target"), it.numeric("amount"), it.text("damage_type"), it.resultName) },
             execute = { e, c -> c.damage(e.target, e.amount, e.damageType)?.let { mapOf("health_lost" to it) } }),
+        EffectMechanic("archetype:dash", Effect.Dash::class.java,
+            mapOf("direction" to mapOf<String, Any>("enum" to listOf("actor.aim", "actor.to_target", "actor.to_ground")),
+                "distance" to numeric), setOf("distance"),
+            "Moves the actor by up to 32 blocks through native collision in loaded chunks. Returns actual distance and whether the path was blocked. An unavailable actor, direction, or path supplies no result.",
+            setOf("travelled", "blocked"), numericInputs = { mapOf("distance" to it.distance) },
+            requiresTarget = { it.direction == DashDirection.TARGET },
+            requiresGround = { it.direction == DashDirection.GROUND },
+            decode = { reader ->
+                val direction = when (reader.option("direction", setOf("actor.aim", "actor.to_target", "actor.to_ground"), "actor.aim")) {
+                    "actor.aim" -> DashDirection.AIM
+                    "actor.to_target" -> DashDirection.TARGET
+                    "actor.to_ground" -> DashDirection.GROUND
+                    else -> error("invalid dash direction")
+                }
+                Effect.Dash(direction, reader.numeric("distance"), reader.resultName)
+            }, execute = { e, c -> c.dash(e) }),
+        EffectMechanic("archetype:impulse", Effect.Impulse::class.java,
+            mapOf("target" to target, "direction" to mapOf<String, Any>("enum" to listOf("away", "toward")),
+                "distance" to numeric), setOf("target", "direction", "distance"),
+            "Pushes or pulls a living actor or selected target relative to the caster, using native collision in loaded chunks. Returns actual travel and a blocked flag. Same-position entities or unavailable paths supply no result.",
+            setOf("travelled", "blocked"), numericInputs = { mapOf("distance" to it.distance) },
+            requiresTarget = { it.target == EffectTarget.TARGET },
+            decode = { reader -> Effect.Impulse(reader.target("target"),
+                when (reader.option("direction", setOf("away", "toward"), "away")) {
+                    "away" -> ImpulseDirection.AWAY
+                    "toward" -> ImpulseDirection.TOWARD
+                    else -> error("invalid impulse direction")
+                }, reader.numeric("distance"), reader.resultName) },
+            execute = { e, c -> c.impulse(e) }),
+        EffectMechanic("archetype:safe_teleport", Effect.SafeTeleport::class.java,
+            mapOf("target" to target, "destination" to mapOf<String, Any>("enum" to listOf("actor", "target", "ground"))),
+            setOf("target", "destination"),
+            "Teleports an actor or selected target up to 32 blocks in the same dimension only when the destination is loaded, supported, within the world border, and free of collision. Returns arrived=1 on success, 0 on a blocked landing; unavailable destinations supply no result.",
+            setOf("arrived"), requiresTarget = { it.target == EffectTarget.TARGET || it.destination == SpatialTarget.TARGET },
+            requiresGround = { it.destination == SpatialTarget.GROUND },
+            decode = { Effect.SafeTeleport(it.target("target"), it.spatialTarget("destination"), it.resultName) },
+            execute = { e, c -> c.safeTeleport(e) }),
         EffectMechanic("archetype:read_health", Effect.ReadHealth::class.java, mapOf("target" to target), setOf("target"),
             "Reads the recipient's current native health after target revalidation. Returns health, maximum, missing, and fraction; target loss supplies no result.",
             setOf("health", "maximum", "missing", "fraction"), requiresTarget = { it.target == EffectTarget.TARGET },

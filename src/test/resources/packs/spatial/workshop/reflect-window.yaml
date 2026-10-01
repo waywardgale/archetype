@@ -1,0 +1,5 @@
+kind: ability
+id: reflect_window
+name: Reflect window
+effects:
+  - {type: apply_status, status: mirror, target: actor}

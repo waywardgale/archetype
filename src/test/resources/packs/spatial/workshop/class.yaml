@@ -32,3 +32,9 @@ abilities:
   enter_form: {ref: enter_form, slot: enter_form}
   confirm_strike: {ref: confirm_strike, slot: confirm_strike}
   recast_field: {ref: recast_field, slot: recast_field}
+  dash_followup: {ref: dash_followup, slot: dash_followup}
+  push_followup: {ref: push_followup, slot: push_followup}
+  safe_arrival: {ref: safe_arrival, slot: safe_arrival}
+  stun: {ref: apply_stun, slot: stun}
+  reflect: {ref: reflect_window, slot: reflect}
+  leech: {ref: lifesteal_convert, slot: leech}

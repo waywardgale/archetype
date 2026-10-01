@@ -2,6 +2,7 @@ package dev.archetype.runtime
 
 import dev.archetype.definitions.*
 import java.util.UUID
+import kotlin.math.cos
 
 class TargetSelection(private val world: WorldOps) {
     fun select(actor: UUID, frame: Frame, selector: Selector, excluded: Set<UUID> = emptySet(), charge: (Int) -> Unit): List<UUID> {
@@ -38,13 +39,21 @@ class TargetSelection(private val world: WorldOps) {
         if (entity.position.dimension != frame.position.dimension || !entity.position.value.finite() ||
             !entity.health.isFinite() || !entity.maximumHealth.isFinite() || entity.health <= 0 || entity.maximumHealth <= 0) return false
         if (!selector.includeActor && entity.id == actor) return false
+        if (selector.entityType != null && entity.typeId != selector.entityType) return false
         val relationship = when (selector.relation) {
             Relation.ANY -> true
             Relation.ALLY -> entity.ally
             Relation.ENEMY -> !entity.ally
             Relation.SELF -> entity.id == actor
         }
+        val facing = selector.maximumFacingAngle?.let { maxAngle ->
+            val towardOrigin = frame.position.value - entity.position.value
+            val look = world.direction(entity.id)
+            towardOrigin.finite() && towardOrigin.lengthSquared() > 1e-12 && look.finite() && look.lengthSquared() > 1e-12 &&
+                look.normalized().dot(towardOrigin.normalized()) >= cos(Math.toRadians(maxAngle)) - 1e-12
+        } ?: true
         return relationship && entity.health / entity.maximumHealth in selector.minimumHealth..selector.maximumHealth &&
+            facing &&
             selector.shape.contains(frame.local(entity.position.value)) &&
             (!selector.lineOfSight || world.lineOfSight(frame.position, entity.id))
     }

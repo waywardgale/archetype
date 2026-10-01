@@ -12,11 +12,16 @@ class ActivationRestrictionTest {
     private val third = UUID(0, 3)
     private class World : WorldOps {
         var heals = 0
+        var displacements = 0
         override fun validTarget(actor: UUID, target: UUID) = true
         override fun heal(target: UUID, amount: Double): Double { heals++; return amount }
         override fun damage(actor: UUID, target: UUID, amount: Double, damageType: String) = amount
         override fun position(entity: UUID) = Position("test", Vec(0.0, 0.0, 0.0))
         override fun loaded(position: Position) = true
+        override fun displace(entity: UUID, direction: Vec, distance: Double): MotionResult {
+            displacements++
+            return MotionResult(distance, false)
+        }
     }
     private fun compile(restrictions: String = "[activate]"): CompileResult {
         val files = listOf(
@@ -32,13 +37,17 @@ abilities:
   strike:
     definition:
       name: Strike
-      effects: [{type: heal, target: actor, amount: 1}]""",
+      effects: [{type: heal, target: actor, amount: 1}]
+  dash:
+    definition:
+      name: Dash
+      effects: [{type: dash, distance: 4}]""",
             "workshop/status.yaml" to "kind: status\nid: silence\nduration: 500ms\nrestrictions: $restrictions",
         )
         return ManifestCompiler().compile(PackSnapshot(files.map { SourceFile(it.first, it.second.toByteArray()) }, "v1"))
     }
-    private fun runtime(world: World): AbilityRuntime {
-        val result = compile()
+    private fun runtime(world: World, restrictions: String = "[activate]"): AbilityRuntime {
+        val result = compile(restrictions)
         assertTrue(result is CompileResult.Valid, "$result")
         return AbilityRuntime(world).also {
             it.publish((result as CompileResult.Valid).definitions)
@@ -64,7 +73,28 @@ abilities:
     }
 
     @Test fun `unsupported action restrictions fail at the authoring field`() {
-        val result = compile("[jump]") as CompileResult.Invalid
+        val result = compile("[fly]") as CompileResult.Invalid
         assertTrue(result.diagnostics.any { it.field == "restrictions[0]" })
+    }
+
+    @Test fun `movement jump and attack restrictions compose and moving status blocks authored dash`() {
+        val world = World()
+        val runtime = runtime(world, "[move, jump, attack]")
+        assertEquals(CastResult.Applied, cast(runtime, other, "silence", actor))
+        assertTrue(runtime.isRestricted(actor, ActionRestriction.MOVE))
+        assertTrue(runtime.isRestricted(actor, ActionRestriction.JUMP))
+        assertTrue(runtime.isRestricted(actor, ActionRestriction.ATTACK))
+        assertFalse(runtime.isRestricted(actor, ActionRestriction.ACTIVATE))
+        assertEquals(CastResult.Applied, cast(runtime, actor, "dash"))
+        assertEquals(0, world.displacements)
+        runtime.onLogout(other)
+        assertFalse(runtime.isRestricted(actor, ActionRestriction.MOVE))
+        assertEquals(CastResult.Applied, cast(runtime, actor, "dash"))
+        assertEquals(1, world.displacements)
+    }
+
+    @Test fun `duplicate action restrictions are rejected`() {
+        val result = compile("[move, move]") as CompileResult.Invalid
+        assertTrue(result.diagnostics.any { it.field == "restrictions" })
     }
 }

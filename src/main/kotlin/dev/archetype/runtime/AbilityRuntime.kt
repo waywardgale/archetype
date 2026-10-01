@@ -13,6 +13,9 @@ interface WorldOps {
     fun validTarget(actor: UUID, target: UUID): Boolean
     fun heal(target: UUID, amount: Double): Double
     fun damage(actor: UUID, target: UUID, amount: Double, damageType: String): Double
+    /** Native collision applies the requested displacement without loading chunks. */
+    fun displace(entity: UUID, direction: Vec, distance: Double): MotionResult? = null
+    fun safeTeleport(entity: UUID, destination: Position): Boolean? = null
     fun availableTarget(actor: UUID, target: UUID): Boolean = validTarget(actor, target)
     fun validTarget(actor: UUID, target: UUID, range: Double): Boolean = validTarget(actor, target)
     fun position(entity: UUID): Position? = null
@@ -41,9 +44,12 @@ sealed interface ProjectileContact {
     data object Unavailable : ProjectileContact
 }
 
+data class MotionResult(val travelled: Double, val blocked: Boolean)
+
 data class PlayerRecord(
     val ownedClasses: MutableSet<String> = linkedSetOf(),
     val activeClasses: MutableSet<String> = linkedSetOf(),
+    val specializations: MutableMap<String, String> = linkedMapOf(),
     val resources: MutableMap<String, Double> = linkedMapOf(),
     val cooldowns: MutableMap<String, Int> = linkedMapOf(),
     val regenerationTimers: MutableMap<String, Int> = linkedMapOf(),
@@ -180,6 +186,9 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
     private val failedPassives = mutableSetOf<PassiveKey>()
     private val failures = ArrayDeque<String>()
     private val onlineClock = mutableMapOf<UUID, Long>()
+    private data class ContributionCredit(val owner: UUID, var lastHit: Long)
+    private val contributors = linkedMapOf<UUID, MutableMap<UUID, ContributionCredit>>()
+    private var elapsedTicks = 0L
     private val castsThisTick = mutableMapOf<UUID, Int>()
     private val talentActionsThisTick = mutableMapOf<UUID, Int>()
     private val ownerWorkThisTick = mutableMapOf<UUID, Int>()
@@ -230,6 +239,7 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
         val track = definitions.progressionTracks[tree.track] ?: return TalentResult.Rejected("track is unavailable")
         val classId = if (track.scope == ProgressScope.CLASS) record(owner).activeClasses.firstOrNull()
             ?: return TalentResult.Rejected("class is not active") else null
+        if (!treeApplies(owner, classId, tree)) return TalentResult.Rejected("specialization is not active")
         val view = progress(owner, tree.track, classId) ?: return TalentResult.Rejected("progress is unavailable")
         val state = record(owner).progression.getValue("${classId ?: "player"}|${tree.track}")
         val purchaseKey = "$treeId|$nodeId"
@@ -259,6 +269,7 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
         val tree = definitions.unlockTrees[treeId] ?: return 0
         val track = definitions.progressionTracks[tree.track] ?: return 0
         val classId = if (track.scope == ProgressScope.CLASS) record(owner).activeClasses.firstOrNull() ?: return 0 else null
+        if (!treeApplies(owner, classId, tree)) return 0
         val state = record(owner).progression["${classId ?: "player"}|${tree.track}"] ?: return 0
         var removed = 0
         for ((key, purchase) in state.purchases.toMap()) if (key.startsWith("$treeId|")) {
@@ -276,6 +287,7 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
         for (tree in definitions.unlockTrees.values) {
             val track = definitions.progressionTracks[tree.track] ?: continue
             val classId = if (track.scope == ProgressScope.CLASS) activeClass ?: continue else null
+            if (!treeApplies(owner, classId, tree)) continue
             val view = progress(owner, track.id, classId) ?: continue
             val state = record(owner).progression["${classId ?: "player"}|${track.id}"] ?: continue
             for (node in tree.nodes.values) {
@@ -347,16 +359,29 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
             state.points[payment.budget] = ((state.points[payment.budget] ?: 0) + payment.amount).coerceAtMost(1_000_000)
     }
 
-    fun onEntityDeath(creditedPlayer: UUID?, victimPosition: Position? = null) {
-        val owner = creditedPlayer ?: return
-        if (owner !in players || !world.availableTarget(owner, owner)) return
+    /** Records only positive committed native health loss from a server-resolved player source. */
+    fun recordContribution(victim: UUID, owner: UUID, healthLost: Double) {
+        if (!healthLost.isFinite() || healthLost <= 0.0 || victim == owner || owner !in players) return
+        val byOwner = contributors.getOrPut(victim) {
+            if (contributors.size >= 128) contributors.remove(contributors.keys.first())
+            linkedMapOf()
+        }
+        if (owner !in byOwner && byOwner.size >= 32) byOwner.remove(byOwner.keys.first())
+        byOwner[owner] = ContributionCredit(owner, elapsedTicks)
+    }
+
+    fun onEntityDeath(creditedPlayer: UUID?, victimPosition: Position? = null, victim: UUID? = null) {
+        val recentContributors = victim?.let { contributors.remove(it)?.values.orEmpty()
+            .filter { elapsedTicks - it.lastHit <= 400 }.map { it.owner } }.orEmpty()
         for (track in definitions.progressionTracks.values) {
             for (rule in track.earningRules) if (rule.event == ProgressEvent.ENTITY_DEATH) {
                 // ASVS 2.3.1: recipients and the event position come from server state, never a client packet.
                 val recipients = when (rule.recipients) {
-                    ProgressRecipients.ACTOR -> listOf(owner)
-                    ProgressRecipients.NEARBY_ALLIES -> victimPosition?.let {
+                    ProgressRecipients.ACTOR -> listOfNotNull(creditedPlayer)
+                    ProgressRecipients.CONTRIBUTORS -> recentContributors
+                    ProgressRecipients.NEARBY_ALLIES -> creditedPlayer?.let { owner -> victimPosition?.let {
                         world.nearbyAlliedPlayers(owner, it, rule.range, 128)
+                    }
                     }.orEmpty()
                 }.distinct().filter { it in players && world.availableTarget(it, it) && progress(it, track.id) != null }
                     .sortedBy(UUID::toString).take(128)
@@ -368,6 +393,16 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
                     if (amount > 0) awardXp(recipient, track.id, amount)
                 }
             }
+        }
+    }
+
+    /** Mirrors a server-observed positive vanilla XP grant, bounded to one million track XP per event. */
+    fun onVanillaExperience(owner: UUID, points: Int) {
+        if (points <= 0 || owner !in players || !world.availableTarget(owner, owner)) return
+        for (track in definitions.progressionTracks.values) {
+            val multiplier = track.earningRules.asSequence().filter { it.event == ProgressEvent.VANILLA_XP }
+                .sumOf { it.xp }
+            if (multiplier > 0) awardXp(owner, track.id, minOf(1_000_000L, points.toLong() * multiplier))
         }
     }
 
@@ -393,6 +428,8 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
 
     private fun trackAllowsClass(track: ProgressionTrackDef, classId: String): Boolean =
         track.classes.let { if (it.isEmpty()) classId.substringBefore(':') == track.id.substringBefore(':') else classId in it }
+    private fun treeApplies(owner: UUID, classId: String?, tree: UnlockTreeDef): Boolean =
+        tree.specializations.isEmpty() || (classId != null && players[owner]?.specializations?.get(classId) in tree.specializations)
     fun readDeclaredState(player: UUID, classId: String, stateId: String, field: String): StateValue? {
         val definition = definitions.states[stateId] ?: return null
         if (definition.scope in setOf(StateScope.ACTIVATION, StateScope.STATUS)) return null
@@ -421,13 +458,18 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
     fun recastActive(owner: UUID, classId: String, grant: String): Boolean =
         recasts[PassiveKey(owner, classId, grant)]?.let { it.scope.lifetime.active && it.expires > now(owner) } == true
     fun grantsFor(owner: UUID, classId: String): Map<String, Grant> = grantsFor(owner, classId, definitions)
+    fun activeSpecialization(owner: UUID, classId: String): String =
+        players[owner]?.specializations?.get(classId)?.takeIf { definitions.specializations[it]?.classId == classId }.orEmpty()
 
     private fun grantsFor(owner: UUID, classId: String, set: DefinitionSet): Map<String, Grant> {
         val base = set.classes[classId]?.grants ?: return emptyMap()
         val result = LinkedHashMap(base)
+        val chosen = players[owner]?.specializations?.get(classId)
+        chosen?.let { set.specializations[it] }?.takeIf { it.classId == classId }?.let { result.putAll(it.grants) }
         for (tree in set.unlockTrees.values) {
             val track = set.progressionTracks[tree.track] ?: continue
             if (track.scope == ProgressScope.CLASS && !trackAllowsClass(track, classId)) continue
+            if (!treeApplies(owner, classId, tree)) continue
             val key = "${if (track.scope == ProgressScope.PLAYER) "player" else classId}|${track.id}"
             val state = players[owner]?.progression?.get(key) ?: TrackProgress()
             val level = minOf(track.levels.lastOrNull { it.xp <= state.earnedXp }?.level ?: 1,
@@ -451,6 +493,7 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
             val track = set.progressionTracks[tree.track] ?: return@flatMap emptySequence<AbilityReplacement>()
             if (track.scope == ProgressScope.CLASS && !trackAllowsClass(track, classId))
                 return@flatMap emptySequence<AbilityReplacement>()
+            if (!treeApplies(owner, classId, tree)) return@flatMap emptySequence<AbilityReplacement>()
             val key = "${if (track.scope == ProgressScope.PLAYER) "player" else classId}|${track.id}"
             val state = earned[key] ?: TrackProgress()
             val level = minOf(track.levels.lastOrNull { it.xp <= state.earnedXp }?.level ?: 1, track.capLevel ?: Int.MAX_VALUE)
@@ -478,6 +521,9 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
     fun statuses(target: UUID): List<StatusView> = statusesByTarget[target].orEmpty().filter { it.lifetime.active }.map {
         StatusView(it.definition.id, it.key.owner, it.key.classId, it.key.grant, it.key.application, it.stackExpiries.size,
             if (it.key.membership != null) null else (it.stackExpiries.max() - now(it.key.owner)).coerceAtLeast(0).toInt(), it.key.membership != null)
+    }
+    fun isRestricted(target: UUID, action: ActionRestriction): Boolean = statusesByTarget[target].orEmpty().any {
+        it.lifetime.active && action in it.definition.restrictions
     }
     fun timers(owner: UUID): List<TimerView> = timers.values.filter { it.key.owner == owner && it.lifetime.active }.map {
         TimerView(it.key.name, it.key.target, it.key.classId, it.key.grant, (it.due - now(owner)).coerceAtLeast(0).toInt())
@@ -542,7 +588,21 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
         } catch (failure: Exception) { fail(scope, failure) }
         prune(releaseIdle = true)
     }
-    fun shutdown() { cancelWhere { true }; transientStates.clear(); chargeHolds.clear(); confirmHolds.clear(); recasts.clear() }
+    /** After-commit reflection is bounded and runs only for a direct, non-reflected native hit. */
+    fun reflectNativeDamage(target: UUID, attacker: UUID, healthLost: Double): Double {
+        if (target == attacker || !healthLost.isFinite() || healthLost <= 0.0) return 0.0
+        var reflected = 0.0
+        val policies = statusesByTarget[target].orEmpty().filter { it.lifetime.active && it.definition.reflect != null }.take(8)
+        for (status in policies) {
+            val policy = status.definition.reflect ?: continue
+            val amount = minOf(policy.cap, healthLost * policy.fraction)
+            if (amount <= 0.0 || status.key.owner == attacker) continue
+            try { reflected += world.damage(status.key.owner, attacker, amount, policy.damageType).coerceAtLeast(0.0) }
+            catch (failure: Exception) { fail(status.scope, failure) }
+        }
+        return reflected
+    }
+    fun shutdown() { cancelWhere { true }; transientStates.clear(); chargeHolds.clear(); confirmHolds.clear(); recasts.clear(); contributors.clear() }
 
     fun installRecord(player: UUID, record: PlayerRecord) {
         for ((key, amount) in record.resources.toMap()) definitions.resources[key.substringAfterLast('|')]?.let {
@@ -575,6 +635,8 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
     }
 
     fun onLogout(player: UUID) {
+        contributors.values.forEach { it.remove(player) }
+        contributors.remove(player)
         chargeHolds.keys.removeIf { it.owner == player }
         confirmHolds.keys.removeIf { it.owner == player }
         transientStates.remove(player)
@@ -652,6 +714,29 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
         return true
     }
 
+    fun selectSpecialization(player: UUID, classId: String, specializationId: String): Boolean {
+        val definition = definitions.specializations[specializationId] ?: return false
+        val record = record(player)
+        if (definition.classId != classId || classId !in record.ownedClasses) return false
+        val old = record.specializations[classId]
+        if (old == specializationId) return true
+        val oldGrants = definitions.specializations[old]?.grants.orEmpty()
+        val treeGrants = definitions.unlockTrees.values.asSequence()
+            .filter { (old != null && old in it.specializations) || specializationId in it.specializations }
+            .flatMap { it.nodes.values.asSequence() }.flatMap { it.abilities.asSequence() }.map { it.grant }.toSet()
+        val affected = oldGrants.keys + definition.grants.keys + treeGrants
+        chargeHolds.keys.removeIf { it.owner == player && it.classId == classId && it.grant in affected }
+        confirmHolds.keys.removeIf { it.owner == player && it.classId == classId && it.grant in affected }
+        cancelWhere { it.owner == player && it.classId == classId && it.grant in affected }
+        record.specializations[classId] = specializationId
+        reconcileCharges(player, record)
+        reconcileReplacements(player)
+        prune(releaseIdle = true)
+        failedPassives.removeIf { it.owner == player && it.classId == classId && it.grant in affected }
+        if (classId in record.activeClasses) activatePassives(player, classId)
+        return true
+    }
+
     private fun activatePassives(player: UUID, classId: String) {
         if (!world.availableTarget(player, player)) return
         val grants = grantsFor(player, classId)
@@ -717,7 +802,7 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
             return CastResult.Rejected("channel is already active")
         if (!world.availableTarget(player, player)) return CastResult.Rejected("actor is unavailable")
         // ASVS 2.3.1, 2.3.2: authoritative restrictions are checked before any cost, charge, or cooldown commits.
-        if (statusesByTarget[player].orEmpty().any { it.lifetime.active && ActionRestriction.ACTIVATE in it.definition.restrictions })
+        if (isRestricted(player, ActionRestriction.ACTIVATE))
             return CastResult.Rejected("ability activation is restricted")
         var requestedTarget = target ?: recastWindow?.scope?.target
         if (ability.activation == Activation.CONFIRM) {
@@ -854,6 +939,11 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
     }
 
     fun tick(onlinePlayers: Collection<UUID>) {
+        elapsedTicks++
+        if (elapsedTicks % 20L == 0L) contributors.entries.removeIf { (_, credits) ->
+            credits.values.removeIf { elapsedTicks - it.lastHit > 400 }
+            credits.isEmpty()
+        }
         castsThisTick.clear()
         talentActionsThisTick.clear()
         ownerWorkThisTick.clear()
@@ -1038,6 +1128,60 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
         override fun damage(target: EffectTarget, amount: Numeric, damageType: String): Double? {
             val id = target(target) ?: return null
             return world.damage(scope.owner, id, amount.amount(results), damageType)
+        }
+        override fun dash(effect: Effect.Dash): Map<String, Double>? {
+            if (target(EffectTarget.ACTOR) == null) return null
+            if (isRestricted(scope.owner, ActionRestriction.MOVE)) return null
+            val distance = effect.distance.value(results)
+            require(distance.isFinite() && distance in 0.01..32.0) { "dash distance must be 0.01..32 blocks" }
+            val actorPosition = world.position(scope.owner) ?: return null
+            val direction = when (effect.direction) {
+                DashDirection.AIM -> world.direction(scope.owner)
+                DashDirection.TARGET -> {
+                    val id = target(EffectTarget.TARGET) ?: return null
+                    val destination = world.position(id) ?: return null
+                    if (destination.dimension != actorPosition.dimension) return null
+                    destination.value - actorPosition.value
+                }
+                DashDirection.GROUND -> {
+                    val destination = scope.ground ?: return null
+                    if (destination.dimension != actorPosition.dimension || !world.loaded(destination)) return null
+                    destination.value - actorPosition.value
+                }
+            }
+            if (!direction.finite() || direction.lengthSquared() <= 1e-12) return null
+            val outcome = world.displace(scope.owner, direction.normalized(), distance) ?: return null
+            require(outcome.travelled.isFinite() && outcome.travelled in 0.0..distance + 1e-6) { "invalid dash outcome" }
+            return mapOf("travelled" to outcome.travelled, "blocked" to if (outcome.blocked) 1.0 else 0.0)
+        }
+        override fun impulse(effect: Effect.Impulse): Map<String, Double>? {
+            val id = target(effect.target) ?: return null
+            if (isRestricted(id, ActionRestriction.MOVE)) return null
+            val actorPosition = world.position(scope.owner) ?: return null
+            val targetPosition = world.position(id) ?: return null
+            if (actorPosition.dimension != targetPosition.dimension) return null
+            val distance = effect.distance.value(results)
+            require(distance.isFinite() && distance in 0.01..32.0) { "impulse distance must be 0.01..32 blocks" }
+            val delta = targetPosition.value - actorPosition.value
+            if (!delta.finite() || delta.lengthSquared() <= 1e-12) return null
+            val direction = delta.normalized() * if (effect.direction == ImpulseDirection.AWAY) 1.0 else -1.0
+            val outcome = world.displace(id, direction, distance) ?: return null
+            require(outcome.travelled.isFinite() && outcome.travelled in 0.0..distance + 1e-6) { "invalid impulse outcome" }
+            return mapOf("travelled" to outcome.travelled, "blocked" to if (outcome.blocked) 1.0 else 0.0)
+        }
+        override fun safeTeleport(effect: Effect.SafeTeleport): Map<String, Double>? {
+            val id = target(effect.target) ?: return null
+            if (isRestricted(id, ActionRestriction.MOVE)) return null
+            val origin = world.position(id) ?: return null
+            val destination = when (effect.destination) {
+                SpatialTarget.ACTOR -> world.position(scope.owner)
+                SpatialTarget.TARGET -> target(EffectTarget.TARGET)?.let(world::position)
+                SpatialTarget.GROUND -> scope.ground
+            } ?: return null
+            if (origin.dimension != destination.dimension || !destination.value.finite() ||
+                (origin.value - destination.value).lengthSquared() > 32.0 * 32.0 || !world.loaded(destination)) return null
+            val arrived = world.safeTeleport(id, destination) ?: return null
+            return mapOf("arrived" to if (arrived) 1.0 else 0.0)
         }
         override fun readHealth(target: EffectTarget): Map<String, Double>? {
             val id = target(target) ?: return null

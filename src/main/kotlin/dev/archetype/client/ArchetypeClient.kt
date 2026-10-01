@@ -6,6 +6,7 @@ import dev.archetype.minecraft.ReleasePayload
 import dev.archetype.minecraft.TalentSelectPayload
 import dev.archetype.minecraft.TalentRespecPayload
 import dev.archetype.minecraft.SelectClassPayload
+import dev.archetype.minecraft.SelectSpecializationPayload
 import dev.archetype.minecraft.StatePayload
 import net.fabricmc.api.ClientModInitializer
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents
@@ -23,12 +24,13 @@ object ArchetypeClient : ClientModInitializer {
     private var state: StatePayload? = null
     private val category = KeyMapping.Category.register(Identifier.fromNamespaceAndPath("archetype", "controls"))
     private lateinit var cycleClass: KeyMapping
+    private lateinit var cycleSpecialization: KeyMapping
     private lateinit var previousPage: KeyMapping
     private lateinit var nextPage: KeyMapping
     private lateinit var talentMenu: KeyMapping
     private lateinit var talentRespec: KeyMapping
     private val slots = mutableListOf<KeyMapping>()
-    private val heldChannels = mutableMapOf<Int, Pair<String, String>>()
+    private val heldChannels = mutableMapOf<Int, Triple<String, String, String>>()
     private var page = 0
     private var talentPage = 0
     private var talentsOpen = false
@@ -37,6 +39,7 @@ object ArchetypeClient : ClientModInitializer {
         ClientPlayConnectionEvents.JOIN.register { _, _, _ -> state = null; page = 0; talentPage = 0; talentsOpen = false; heldChannels.clear() }
         ClientPlayConnectionEvents.DISCONNECT.register { _, _ -> state = null; page = 0; talentPage = 0; talentsOpen = false; heldChannels.clear() }
         cycleClass = KeyMappingHelper.registerKeyMapping(KeyMapping("key.archetype.cycle_class", InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_B, category))
+        cycleSpecialization = KeyMappingHelper.registerKeyMapping(KeyMapping("key.archetype.cycle_specialization", InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_K, category))
         previousPage = KeyMappingHelper.registerKeyMapping(KeyMapping("key.archetype.previous_page", InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_LEFT_BRACKET, category))
         nextPage = KeyMappingHelper.registerKeyMapping(KeyMapping("key.archetype.next_page", InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_RIGHT_BRACKET, category))
         talentMenu = KeyMappingHelper.registerKeyMapping(KeyMapping("key.archetype.talents", InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_M, category))
@@ -47,7 +50,9 @@ object ArchetypeClient : ClientModInitializer {
         }
         ClientPlayNetworking.registerGlobalReceiver(StatePayload.TYPE) { packet, context ->
             context.client().execute {
-                if (state?.activeClass != packet.activeClass) { page = 0; talentPage = 0; heldChannels.clear() }
+                if (state?.activeClass != packet.activeClass || state?.activeSpecialization != packet.activeSpecialization) {
+                    page = 0; talentPage = 0; heldChannels.clear()
+                }
                 state = packet
                 page = page.coerceAtMost(((packet.grants.size - 1) / 8).coerceAtLeast(0))
                 talentPage = talentPage.coerceAtMost(((packet.talents.size - 1) / 8).coerceAtLeast(0))
@@ -58,7 +63,7 @@ object ArchetypeClient : ClientModInitializer {
             if (client.player == null) return@register
             if (!client.mouseHandler.isMouseGrabbed) {
                 for ((_, identity) in heldChannels) ClientPlayNetworking.send(ReleasePayload(identity.first, identity.second,
-                    current.generation, null))
+                    identity.third, current.generation, null))
                 heldChannels.clear()
                 return@register
             }
@@ -67,6 +72,13 @@ object ArchetypeClient : ClientModInitializer {
                 if (current.classes.isNotEmpty()) {
                     val index = current.classes.indexOf(current.activeClass)
                     ClientPlayNetworking.send(SelectClassPayload(current.classes[(index + 1) % current.classes.size]))
+                }
+            }
+            while (cycleSpecialization.consumeClick()) {
+                if (current.specializations.isNotEmpty()) {
+                    val index = current.specializations.indexOf(current.activeSpecialization)
+                    ClientPlayNetworking.send(SelectSpecializationPayload(current.activeClass,
+                        current.specializations[(index + 1) % current.specializations.size]))
                 }
             }
             val pageCount = (((if (talentsOpen) current.talents.size else current.grants.size) + slots.size - 1) / slots.size).coerceAtLeast(1)
@@ -81,8 +93,9 @@ object ArchetypeClient : ClientModInitializer {
                     }
                     val grant = current.grants.getOrNull(page * slots.size + index) ?: break
                     val target = (client.hitResult as? EntityHitResult)?.entity?.uuid
-                    ClientPlayNetworking.send(CastPayload(current.activeClass, grant.name, current.generation, target))
-                    if (grant.channel || grant.charge) heldChannels[index] = current.activeClass to grant.name
+                    ClientPlayNetworking.send(CastPayload(current.activeClass, current.activeSpecialization,
+                        grant.name, current.generation, target))
+                    if (grant.channel || grant.charge) heldChannels[index] = Triple(current.activeClass, current.activeSpecialization, grant.name)
                 }
             }
             while (talentRespec.consumeClick()) if (talentsOpen) {
@@ -91,7 +104,7 @@ object ArchetypeClient : ClientModInitializer {
             }
             for ((index, identity) in heldChannels.toMap()) if (!slots[index].isDown) {
                 val target = (client.hitResult as? EntityHitResult)?.entity?.uuid
-                ClientPlayNetworking.send(ReleasePayload(identity.first, identity.second, current.generation, target))
+                ClientPlayNetworking.send(ReleasePayload(identity.first, identity.second, identity.third, current.generation, target))
                 heldChannels.remove(index)
             }
         }
@@ -119,7 +132,8 @@ object ArchetypeClient : ClientModInitializer {
             val visible = current.grants.drop(page * slots.size).take(slots.size)
             val pageCount = ((current.grants.size + slots.size - 1) / slots.size).coerceAtLeast(1)
             var top = graphics.guiHeight() - 18 - (visible.size + current.resources.size + current.progression.size + 1) * 11
-            graphics.text(client.font, "${current.activeClass}  ${page + 1}/$pageCount", left, top, 0xFFE6D8B0.toInt())
+            val specialization = current.activeSpecialization.takeIf { it.isNotEmpty() }?.let { "  [$it]" }.orEmpty()
+            graphics.text(client.font, "${current.activeClass}$specialization  ${page + 1}/$pageCount", left, top, 0xFFE6D8B0.toInt())
             top += 11
             visible.forEachIndexed { index, grant ->
                 val key = slots.getOrNull(index)?.translatedKeyMessage?.string ?: "-"
