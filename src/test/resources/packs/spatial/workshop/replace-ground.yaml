@@ -1,0 +1,12 @@
+kind: ability
+id: replace_ground
+name: Replace ground
+target: {type: ground, range: 12}
+effects:
+  - type: edit_terrain
+    operation: replace
+    at: ground
+    region: {type: box, size: [2, 1, 2]}
+    block: minecraft:stone_bricks
+    filter: {blocks: [minecraft:dirt, minecraft:grass_block]}
+    duration: 6s

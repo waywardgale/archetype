@@ -79,6 +79,8 @@ interface EffectReader {
     fun statusFilter(): StatusFilter
     fun selector(key: String, shape: Shape? = null): Selector
     fun anchor(key: String): Anchor
+    fun terrainRegion(key: String): TerrainRegion
+    fun terrainFilter(key: String): TerrainFilter
     val resultName: String?
     val identity: String
 }
@@ -90,6 +92,8 @@ interface EffectExecution {
     fun dash(effect: Effect.Dash): Map<String, Double>?
     fun impulse(effect: Effect.Impulse): Map<String, Double>?
     fun safeTeleport(effect: Effect.SafeTeleport): Map<String, Double>?
+    fun placePattern(effect: Effect.PlacePattern): Map<String, Double>?
+    fun editTerrain(effect: Effect.EditTerrain): Map<String, Double>?
     fun readHealth(target: EffectTarget): Map<String, Double>?
     fun shield(effect: Effect.Shield): Map<String, Double>?
     fun resource(id: String, amount: Numeric, spend: Boolean): Double
@@ -405,6 +409,57 @@ object BuiltinEffects {
             requiresGround = { it.destination == SpatialTarget.GROUND },
             decode = { Effect.SafeTeleport(it.target("target"), it.spatialTarget("destination"), it.resultName) },
             execute = { e, c -> c.safeTeleport(e) }),
+        EffectMechanic("archetype:place_pattern", Effect.PlacePattern::class.java,
+            mapOf("pattern" to ref("reference"), "at" to mapOf<String, Any>("enum" to listOf("actor", "target", "ground")),
+                "rotation" to integer(0, 270), "mirror" to mapOf<String, Any>("enum" to listOf("none", "x", "z")),
+                "duration" to duration, "permanent" to mapOf<String, Any>("type" to "boolean"),
+                "allow_fluid" to mapOf<String, Any>("type" to "boolean"),
+                "allow_gravity" to mapOf<String, Any>("type" to "boolean")),
+            setOf("pattern", "at"),
+            "Places a bounded block palette in loaded terrain. Temporary cells use a durable ownership journal; permanent placement must be explicit.",
+            setOf("placed"), requiresTarget = { it.at == SpatialTarget.TARGET },
+            requiresGround = { it.at == SpatialTarget.GROUND },
+            decode = { reader ->
+                val rotation = reader.integer("rotation", 0, 270, 0)
+                require(rotation % 90 == 0) { "rotation must be 0, 90, 180, or 270" }
+                val permanent = reader.boolean("permanent", false)
+                require(!(permanent && reader.has("duration"))) { "permanent placement cannot have duration" }
+                Effect.PlacePattern(reader.reference("pattern"), reader.spatialTarget("at"), rotation,
+                    PatternMirror.valueOf(reader.option("mirror", setOf("none", "x", "z"), "none").uppercase()),
+                    if (permanent) null else reader.duration("duration", positive = true, default = 120),
+                    reader.boolean("allow_fluid", false), reader.boolean("allow_gravity", false), reader.resultName)
+            }, execute = { e, c -> c.placePattern(e) }),
+        EffectMechanic("archetype:edit_terrain", Effect.EditTerrain::class.java,
+            mapOf("operation" to mapOf<String, Any>("enum" to listOf("set", "replace", "break")),
+                "at" to mapOf<String, Any>("enum" to listOf("actor", "target", "ground")),
+                "region" to mapOf<String, Any>("type" to "object"), "block" to text,
+                "filter" to mapOf<String, Any>("type" to "object"), "duration" to duration,
+                "permanent" to mapOf<String, Any>("type" to "boolean"),
+                "allow_fluid" to mapOf<String, Any>("type" to "boolean"),
+                "allow_gravity" to mapOf<String, Any>("type" to "boolean"),
+                "loot" to mapOf<String, Any>("type" to "boolean")),
+            setOf("operation", "at", "region"),
+            "Edits bounded loaded point, line, box, or sphere cells with optional block/tag filtering. Temporary edits restore owned cells; permanent breaks can opt into native loot.",
+            setOf("placed"), requiresTarget = { it.at == SpatialTarget.TARGET },
+            requiresGround = { it.at == SpatialTarget.GROUND },
+            decode = { reader ->
+                val operation = TerrainOperation.valueOf(reader.option("operation", setOf("set", "replace", "break"), "set").uppercase())
+                val permanent = reader.boolean("permanent", false)
+                require(!(permanent && reader.has("duration"))) { "permanent terrain edit cannot have duration" }
+                val block = if (reader.has("block")) reader.text("block") else null
+                require((operation == TerrainOperation.BREAK) == (block == null)) { "set and replace need block; break cannot declare block" }
+                require(block == null || (block.length <= 256 &&
+                    Regex("[a-z0-9_.-]+:[a-z0-9_./-]+(?:\\[[a-z0-9_=,.-]+])?").matches(block))) {
+                    "invalid block-state syntax"
+                }
+                val filter = if (reader.has("filter")) reader.terrainFilter("filter") else TerrainFilter()
+                require(operation != TerrainOperation.REPLACE || filter.defined) { "replace requires a block or tag filter" }
+                val loot = reader.boolean("loot", false)
+                require(!loot || (operation == TerrainOperation.BREAK && permanent)) { "loot requires a permanent break" }
+                Effect.EditTerrain(operation, reader.spatialTarget("at"), reader.terrainRegion("region"), block,
+                    filter, if (permanent) null else reader.duration("duration", positive = true, default = 120),
+                    reader.boolean("allow_fluid", false), reader.boolean("allow_gravity", false), loot, reader.resultName)
+            }, execute = { e, c -> c.editTerrain(e) }),
         EffectMechanic("archetype:read_health", Effect.ReadHealth::class.java, mapOf("target" to target), setOf("target"),
             "Reads the recipient's current native health after target revalidation. Returns health, maximum, missing, and fraction; target loss supplies no result.",
             setOf("health", "maximum", "missing", "fraction"), requiresTarget = { it.target == EffectTarget.TARGET },

@@ -38,3 +38,5 @@ abilities:
   stun: {ref: apply_stun, slot: stun}
   reflect: {ref: reflect_window, slot: reflect}
   leech: {ref: lifesteal_convert, slot: leech}
+  wall: {ref: place_short_wall, slot: wall}
+  replace: {ref: replace_ground, slot: replace}

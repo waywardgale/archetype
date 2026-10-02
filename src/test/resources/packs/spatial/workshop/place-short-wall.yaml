@@ -1,0 +1,6 @@
+kind: ability
+id: place_short_wall
+name: Place short wall
+target: {type: ground, range: 12}
+effects:
+  - {type: place_pattern, pattern: short_wall, at: ground, rotation: 90, duration: 6s, as: terrain}

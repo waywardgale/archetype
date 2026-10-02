@@ -1,0 +1,10 @@
+kind: block_pattern
+id: short_wall
+origin: [0, 0, 0]
+palette:
+  '#': {block: minecraft:stone_bricks}
+  '.': {skip: true}
+  '_': {block: minecraft:air}
+layers:
+  - ['###']
+  - ['#.#']

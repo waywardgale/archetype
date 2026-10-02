@@ -3,12 +3,24 @@ package dev.archetype.minecraft
 import dev.archetype.runtime.WorldOps
 import dev.archetype.runtime.ProjectileContact
 import dev.archetype.runtime.MotionResult
+import dev.archetype.runtime.TerrainAccess
+import dev.archetype.runtime.TerrainEdit
+import dev.archetype.runtime.TerrainJournal
+import dev.archetype.runtime.TerrainPos
+import dev.archetype.definitions.BlockPatternDef
+import dev.archetype.definitions.PatternMirror
+import dev.archetype.definitions.Effect
+import dev.archetype.definitions.TerrainOperation
+import dev.archetype.definitions.TerrainRegion
+import dev.archetype.definitions.TerrainFilter
 import dev.archetype.definitions.ProjectileEntities
 import dev.archetype.definitions.EntityView
 import dev.archetype.definitions.Position
 import dev.archetype.definitions.Vec
 import net.minecraft.core.BlockPos
+import net.minecraft.commands.arguments.blocks.BlockStateParser
 import net.minecraft.core.Direction
+import net.minecraft.tags.TagKey
 import net.minecraft.core.particles.ParticleTypes
 import net.minecraft.core.registries.Registries
 import net.minecraft.core.registries.BuiltInRegistries
@@ -24,14 +36,145 @@ import net.minecraft.world.entity.MoverType
 import net.minecraft.world.entity.ai.attributes.AttributeModifier
 import net.minecraft.world.entity.ai.attributes.Attributes
 import net.minecraft.world.entity.projectile.ProjectileUtil
+import net.minecraft.world.level.block.FallingBlock
+import net.minecraft.world.level.block.Blocks
+import net.minecraft.world.level.block.state.BlockState
 import net.minecraft.world.level.ClipContext
 import net.minecraft.world.level.entity.EntityTypeTest
 import net.minecraft.world.phys.AABB
 import net.minecraft.world.phys.HitResult
 import net.minecraft.world.phys.Vec3
 import java.util.UUID
+import java.nio.file.Path
+import kotlin.math.roundToInt
 
-class MinecraftWorldOps(private val server: MinecraftServer) : WorldOps {
+class MinecraftWorldOps @JvmOverloads constructor(private val server: MinecraftServer, terrainPath: Path? = null) : WorldOps {
+    private val terrain = terrainPath?.let { path -> TerrainJournal(path, object : TerrainAccess {
+        override fun loaded(position: TerrainPos): Boolean = terrainLevel(position)?.let { level ->
+            level.chunkSource.getChunkNow(position.x shr 4, position.z shr 4) != null
+        } == true
+
+        override fun state(position: TerrainPos): String? = terrainLevel(position)?.takeIf { loaded(position) }
+            ?.getBlockState(BlockPos(position.x, position.y, position.z))?.let(BlockStateParser::serialize)
+
+        override fun mayEdit(actor: UUID, position: TerrainPos, state: String): Boolean {
+            val player = server.playerList.getPlayer(actor) ?: return false
+            val level = terrainLevel(position) ?: return false
+            val pos = BlockPos(position.x, position.y, position.z)
+            val parsed = parseBlockState(state) ?: return false
+            return player.level() == level && loaded(position) && !level.isOutsideBuildHeight(pos) &&
+                level.worldBorder.isWithinBounds(pos) && level.mayInteract(player, pos) &&
+                level.getBlockEntity(pos) == null && !level.getBlockState(pos).hasBlockEntity() &&
+                !parsed.hasBlockEntity()
+        }
+
+        override fun write(position: TerrainPos, state: String): Boolean {
+            val level = terrainLevel(position) ?: return false
+            if (!loaded(position)) return false
+            val parsed = parseBlockState(state) ?: return false
+            return TerrainBridge.ownedWrite(position) {
+                level.setBlock(BlockPos(position.x, position.y, position.z), parsed, 3)
+            }
+        }
+        override fun breakWithLoot(actor: UUID, position: TerrainPos): Boolean {
+            val player = server.playerList.getPlayer(actor) ?: return false
+            val level = terrainLevel(position) ?: return false
+            if (!loaded(position) || player.level() != level) return false
+            return TerrainBridge.ownedWrite(position) {
+                level.destroyBlock(BlockPos(position.x, position.y, position.z), true, player, 512)
+            }
+        }
+    }).also { TerrainBridge.journal = it; it.recoverAfterRestart() } }
+
+    private fun terrainLevel(position: TerrainPos): ServerLevel? = server.allLevels.firstOrNull {
+        it.dimension().identifier().toString() == position.dimension
+    }
+
+    private fun parseBlockState(value: String): BlockState? = try {
+        BlockStateParser.parseForBlock(server.registryAccess().lookupOrThrow(Registries.BLOCK), value, false).blockState()
+    } catch (_: Exception) { null }
+
+    fun supportsBlockState(value: String): Boolean = parseBlockState(value) != null
+    fun supportsBlockTag(value: String): Boolean = try {
+        server.registryAccess().lookupOrThrow(Registries.BLOCK)
+            .get(TagKey.create(Registries.BLOCK, Identifier.parse(value))).isPresent
+    } catch (_: Exception) { false }
+    fun tickTerrain() { terrain?.tick() }
+    fun terrainChunkLoaded(level: ServerLevel, chunkX: Int, chunkZ: Int) {
+        terrain?.recoverChunk(level.dimension().identifier().toString(), chunkX, chunkZ)
+    }
+    fun closeTerrain() { if (TerrainBridge.journal === terrain) TerrainBridge.journal = null }
+    fun terrainPlayerBreak(level: ServerLevel, pos: BlockPos): Boolean {
+        val key = TerrainBridge.key(level, pos)
+        if (terrain?.owned(key) != true) return false
+        terrain.externalWrite(key)
+        level.setBlock(pos, Blocks.AIR.defaultBlockState(), 3)
+        return true
+    }
+
+    override fun terrainActive(source: UUID): Boolean = terrain?.active(source) == true
+    override fun cancelTerrain(source: UUID) { terrain?.cancel(source) }
+    override fun placePattern(actor: UUID, source: UUID, pattern: BlockPatternDef, at: Position,
+        rotation: Int, mirror: PatternMirror, durationTicks: Int?, allowFluid: Boolean,
+        allowGravity: Boolean): Int? {
+        val journal = terrain ?: return null
+        val level = level(at) ?: return null
+        val origin = BlockPos.containing(at.value.x, at.value.y, at.value.z)
+        val edits = pattern.cells.map { cell ->
+            var x = if (mirror == PatternMirror.X) -cell.x else cell.x
+            var z = if (mirror == PatternMirror.Z) -cell.z else cell.z
+            repeat(rotation / 90) { val nextX = -z; z = x; x = nextX }
+            TerrainEdit(TerrainBridge.key(level, origin.offset(x, cell.y, z)), cell.block)
+        }
+        if (edits.isEmpty() || edits.any { level.chunkSource.getChunkNow(it.position.x shr 4, it.position.z shr 4) == null }) return null
+        val allowed = edits.filterNot { edit ->
+            val pos = BlockPos(edit.position.x, edit.position.y, edit.position.z)
+            level.getBlockEntity(pos) != null || level.getBlockState(pos).hasBlockEntity()
+        }
+        if (allowed.any { edit ->
+                val state = parseBlockState(edit.state) ?: return@any true
+                (!allowFluid && !state.fluidState.isEmpty) || (!allowGravity && state.block is FallingBlock)
+            }) return null
+        return if (allowed.isEmpty()) 0 else journal.place(actor, source, allowed, durationTicks)
+    }
+
+    override fun editTerrain(actor: UUID, source: UUID, edit: Effect.EditTerrain, at: Position): Int? {
+        val journal = terrain ?: return null
+        val level = level(at) ?: return null
+        val origin = BlockPos.containing(at.value.x, at.value.y, at.value.z)
+        val offsets = when (val region = edit.region) {
+            TerrainRegion.Point -> listOf(BlockPos.ZERO)
+            is TerrainRegion.Line -> {
+                val steps = maxOf(kotlin.math.abs(region.x), kotlin.math.abs(region.y), kotlin.math.abs(region.z))
+                (0..steps).map { step -> BlockPos((region.x * step.toDouble() / steps).roundToInt(),
+                    (region.y * step.toDouble() / steps).roundToInt(), (region.z * step.toDouble() / steps).roundToInt()) }.distinct()
+            }
+            is TerrainRegion.Box -> (0 until region.width).flatMap { x -> (0 until region.height).flatMap { y ->
+                (0 until region.depth).map { z -> BlockPos(x, y, z) }
+            } }
+            is TerrainRegion.Sphere -> (-region.radius..region.radius).flatMap { x ->
+                (-region.radius..region.radius).flatMap { y -> (-region.radius..region.radius).mapNotNull { z ->
+                    BlockPos(x, y, z).takeIf { x * x + y * y + z * z <= region.radius * region.radius }
+                } }
+            }
+        }
+        val positions = offsets.map { origin.offset(it.x, it.y, it.z) }
+        if (positions.size > 256 || positions.any { level.chunkSource.getChunkNow(it.x shr 4, it.z shr 4) == null }) return null
+        val desired = if (edit.operation == TerrainOperation.BREAK) "minecraft:air" else edit.block ?: return null
+        val state = parseBlockState(desired) ?: return null
+        if ((!edit.allowFluid && !state.fluidState.isEmpty) || (!edit.allowGravity && state.block is FallingBlock)) return null
+        val selected = positions.filter { pos ->
+            val current = level.getBlockState(pos)
+            !current.hasBlockEntity() && level.getBlockEntity(pos) == null &&
+                (edit.operation != TerrainOperation.BREAK || !current.isAir) && matchesTerrainFilter(current, edit.filter)
+        }.map { pos -> TerrainEdit(TerrainBridge.key(level, pos), desired, edit.loot) }
+        return if (selected.isEmpty()) 0 else journal.place(actor, source, selected, edit.durationTicks)
+    }
+
+    private fun matchesTerrainFilter(state: BlockState, filter: TerrainFilter): Boolean = !filter.defined ||
+        BuiltInRegistries.BLOCK.getKey(state.block).toString() in filter.blocks || filter.tags.any { id ->
+            state.`is`(TagKey.create(Registries.BLOCK, Identifier.parse(id)))
+        }
     private val speedBonusId = Identifier.parse("archetype:status_movement_speed")
     override fun movementSpeedBonus(target: UUID, amount: Double) {
         require(amount.isFinite() && amount in 0.0..1.0) { "invalid movement speed bonus" }

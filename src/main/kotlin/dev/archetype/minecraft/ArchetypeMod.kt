@@ -10,6 +10,7 @@ import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback
 import net.fabricmc.fabric.api.entity.event.v1.ServerLivingEntityEvents
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerChunkEvents
 import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking
 import net.fabricmc.fabric.api.event.player.AttackEntityCallback
@@ -18,6 +19,7 @@ import net.fabricmc.fabric.api.event.player.PlayerBlockBreakEvents
 import net.minecraft.commands.Commands
 import net.minecraft.network.chat.Component
 import net.minecraft.server.MinecraftServer
+import net.minecraft.server.level.ServerLevel
 import net.minecraft.server.level.ServerPlayer
 import net.minecraft.server.permissions.Permissions
 import net.minecraft.world.InteractionResult
@@ -57,8 +59,9 @@ object ArchetypeMod : ModInitializer {
             if (!level.isClientSide && CombatBridge.restricted(player.uuid, ActionRestriction.ATTACK))
                 InteractionResult.FAIL else InteractionResult.PASS
         }
-        PlayerBlockBreakEvents.BEFORE.register { level, player, _, _, _ ->
-            level.isClientSide || !CombatBridge.restricted(player.uuid, ActionRestriction.ATTACK)
+        PlayerBlockBreakEvents.BEFORE.register { level, player, pos, _, _ ->
+            if (!level.isClientSide && CombatBridge.restricted(player.uuid, ActionRestriction.ATTACK)) false
+            else !(level is ServerLevel && session?.world?.terrainPlayerBreak(level, pos) == true)
         }
         ServerLifecycleEvents.SERVER_STARTED.register { server ->
             val root = server.getWorldPath(LevelResource.ROOT).resolve("archetype")
@@ -66,8 +69,11 @@ object ArchetypeMod : ModInitializer {
             val catalog = freezeCatalog()
             session = Session(server, root, catalog).also { it.loadInitial(); CombatBridge.runtime = it.runtime }
         }
-        ServerLifecycleEvents.SERVER_STOPPING.register { CombatBridge.runtime = null; session?.runtime?.shutdown(); session?.saveAll(); session = null }
+        ServerLifecycleEvents.SERVER_STOPPING.register { CombatBridge.runtime = null; session?.runtime?.shutdown(); session?.saveAll(); session?.world?.closeTerrain(); session = null }
         ServerTickEvents.END_SERVER_TICK.register { session?.tick() }
+        ServerChunkEvents.CHUNK_LOAD.register { level, chunk, _ ->
+            session?.world?.terrainChunkLoaded(level, chunk.pos.x, chunk.pos.z)
+        }
         ServerPlayConnectionEvents.JOIN.register { handler, _, _ ->
             if (!ServerPlayNetworking.canSend(handler, StatePayload.TYPE)) {
                 handler.disconnect(Component.literal("Archetype is required on the client"))
@@ -243,7 +249,7 @@ object ArchetypeMod : ModInitializer {
 
     private class Session(val server: MinecraftServer, val root: Path, val catalog: MechanicCatalog) {
         private val compiler = ManifestCompiler(catalog)
-        val world = MinecraftWorldOps(server)
+        val world = MinecraftWorldOps(server, root.resolve("terrain-journal.bin"))
         val runtime = AbilityRuntime(world, catalog)
         private val store = PlayerStore(root.resolve("players"))
         private val failedLoads = mutableSetOf<UUID>()
@@ -262,6 +268,7 @@ object ArchetypeMod : ModInitializer {
 
         fun tick() {
             ticks++
+            world.tickTerrain()
             runtime.tick(server.playerList.players.map { it.uuid })
             runtime.drainFailures().forEach { log.warn("Ability interrupted: {}", it) }
             if (ticks % 1200L == 0L) saveAll()
@@ -306,8 +313,19 @@ object ArchetypeMod : ModInitializer {
                         } } + result.definitions.statuses.values.mapNotNull { it.reflect?.damageType })
                         .filterNot(world::supportsDamageType)
                         .distinct()
-                    if (unknownTypes.isNotEmpty()) {
-                        diagnostics = unknownTypes.map { "damage_type: unknown native damage type $it" }
+                    val unknownBlocks = (result.definitions.blockPatterns.values.flatMap { pattern ->
+                        pattern.cells.map { it.block }
+                    } + allEffects.flatMap { catalog.descendants(it).toList() }
+                        .filterIsInstance<Effect.EditTerrain>()
+                        .flatMap { effect -> listOfNotNull(effect.block) + effect.filter.blocks })
+                        .distinct().filterNot(world::supportsBlockState)
+                    val unknownBlockTags = allEffects.flatMap { catalog.descendants(it).toList() }
+                        .filterIsInstance<Effect.EditTerrain>().flatMap { it.filter.tags }
+                        .distinct().filterNot(world::supportsBlockTag)
+                    if (unknownTypes.isNotEmpty() || unknownBlocks.isNotEmpty() || unknownBlockTags.isNotEmpty()) {
+                        diagnostics = unknownTypes.map { "damage_type: unknown native damage type $it" } +
+                            unknownBlocks.map { "terrain: unknown native block state $it" } +
+                            unknownBlockTags.map { "terrain: unknown native block tag $it" }
                         diagnostics.forEach { log.warn("Manifest: {}", it) }
                     } else {
                         // ASVS 15.4.1-15.4.2: validated captured bytes publish on the server tick thread.

@@ -16,6 +16,12 @@ interface WorldOps {
     /** Native collision applies the requested displacement without loading chunks. */
     fun displace(entity: UUID, direction: Vec, distance: Double): MotionResult? = null
     fun safeTeleport(entity: UUID, destination: Position): Boolean? = null
+    fun placePattern(actor: UUID, source: UUID, pattern: BlockPatternDef, at: Position,
+        rotation: Int, mirror: PatternMirror, durationTicks: Int?, allowFluid: Boolean,
+        allowGravity: Boolean): Int? = null
+    fun editTerrain(actor: UUID, source: UUID, edit: Effect.EditTerrain, at: Position): Int? = null
+    fun terrainActive(source: UUID): Boolean = false
+    fun cancelTerrain(source: UUID) {}
     fun availableTarget(actor: UUID, target: UUID): Boolean = validTarget(actor, target)
     fun validTarget(actor: UUID, target: UUID, range: Double): Boolean = validTarget(actor, target)
     fun position(entity: UUID): Position? = null
@@ -107,6 +113,7 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
         val statusDependencies: MutableMap<String, StatusDef> = linkedMapOf(),
         val stateDependencies: MutableMap<String, StateDef> = linkedMapOf(),
         val projectileDependencies: MutableMap<String, ProjectileDef> = linkedMapOf(),
+        val patternDependencies: Map<String, BlockPatternDef> = emptyMap(),
         val originDefinition: String = ability.id, val sourceDimension: String? = null,
         val controllerId: UUID? = null,
         val localState: MutableMap<String, StateValue> = linkedMapOf(),
@@ -162,6 +169,7 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
         val states: MutableMap<String, StateDef>, val projectiles: MutableMap<String, ProjectileDef>, val createdStatuses: Set<String>,
     )
     private val scopes = linkedMapOf<UUID, Scope>()
+    private val terrainScopes = linkedSetOf<UUID>()
     private val pending = mutableListOf<Scheduled>()
     private val chains = mutableListOf<ChainTask>()
     private val areas = mutableListOf<Area>()
@@ -658,7 +666,8 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
                 scope.dependencies.any { (id, definition) -> candidate.areas[id] != definition } ||
                 scope.statusDependencies.any { (id, definition) -> candidate.statuses[id] != definition } ||
                 scope.stateDependencies.any { (id, definition) -> candidate.states[id] != definition }
-                || scope.projectileDependencies.any { (id, definition) -> candidate.projectiles[id] != definition }
+                || scope.projectileDependencies.any { (id, definition) -> candidate.projectiles[id] != definition } ||
+                scope.patternDependencies.any { (id, definition) -> candidate.blockPatterns[id] != definition }
         }
         for (record in players.values) for ((key, amount) in record.resources.toMap()) candidate.resources[key.substringAfterLast('|')]?.let {
             record.resources[key] = amount.coerceIn(it.minimum, it.maximum)
@@ -747,7 +756,8 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
             if (key in passives || key in failedPassives) continue
             val (areas, statuses, states, projectiles, createdStatuses) = controllerDependencies(ability.effects)
             val scope = Scope(UUID.randomUUID(), player, classId, name, ability, null, null, Budget(), Lifetime(),
-                dependencies = areas, statusDependencies = statuses, stateDependencies = states, projectileDependencies = projectiles, sourceDimension = world.position(player)?.dimension)
+                dependencies = areas, statusDependencies = statuses, stateDependencies = states, projectileDependencies = projectiles,
+                patternDependencies = patternDependencies(ability.effects), sourceDimension = world.position(player)?.dimension)
             scopes[scope.id] = scope
             passives[key] = scope
             try {
@@ -910,6 +920,7 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
         for ((key, ticks) in cooldowns) if (ticks > 0) record.cooldowns[key] = ticks
         val scope = Scope(UUID.randomUUID(), player, classId, grantName, ability, if (ability.targeting.type == Targeting.Type.GROUND) null else selectedTarget, ground, Budget(), Lifetime(), dependencies = dependencies,
             statusDependencies = statusDependencies, stateDependencies = stateDependencies, projectileDependencies = projectileDependencies,
+            patternDependencies = patternDependencies(effects),
             sourceDimension = world.position(player)?.dimension)
         scopes[scope.id] = scope
         if (ability.activation == Activation.TOGGLE) toggles[toggleKey] = scope
@@ -1182,6 +1193,30 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
                 (origin.value - destination.value).lengthSquared() > 32.0 * 32.0 || !world.loaded(destination)) return null
             val arrived = world.safeTeleport(id, destination) ?: return null
             return mapOf("arrived" to if (arrived) 1.0 else 0.0)
+        }
+        override fun placePattern(effect: Effect.PlacePattern): Map<String, Double>? {
+            val pattern = scope.patternDependencies[effect.pattern] ?: return null
+            val at = when (effect.at) {
+                SpatialTarget.ACTOR -> world.position(scope.owner)
+                SpatialTarget.TARGET -> target(EffectTarget.TARGET)?.let(world::position)
+                SpatialTarget.GROUND -> scope.ground
+            } ?: return null
+            if (!world.loaded(at)) return null
+            val count = world.placePattern(scope.owner, scope.id, pattern, at, effect.rotation,
+                effect.mirror, effect.durationTicks, effect.allowFluid, effect.allowGravity) ?: return null
+            if (effect.durationTicks != null && count > 0) terrainScopes += scope.id
+            return mapOf("placed" to count.toDouble())
+        }
+        override fun editTerrain(effect: Effect.EditTerrain): Map<String, Double>? {
+            val at = when (effect.at) {
+                SpatialTarget.ACTOR -> world.position(scope.owner)
+                SpatialTarget.TARGET -> target(EffectTarget.TARGET)?.let(world::position)
+                SpatialTarget.GROUND -> scope.ground
+            } ?: return null
+            if (!world.loaded(at)) return null
+            val count = world.editTerrain(scope.owner, scope.id, effect, at) ?: return null
+            if (effect.durationTicks != null && count > 0) terrainScopes += scope.id
+            return mapOf("placed" to count.toDouble())
         }
         override fun readHealth(target: EffectTarget): Map<String, Double>? {
             val id = target(target) ?: return null
@@ -1968,11 +2003,18 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
     }
 
     private fun cancelWhere(predicate: (Scope) -> Boolean) {
-        scopes.values.filter(predicate).forEach { it.lifetime.cancelled = true }
+        scopes.values.filter(predicate).forEach { it.lifetime.cancelled = true; world.cancelTerrain(it.id); terrainScopes.remove(it.id) }
         prune()
     }
 
     private fun prune(releaseIdle: Boolean = false) {
+        terrainScopes.removeIf { source ->
+            val scope = scopes[source]
+            if (scope == null || !scope.lifetime.active || !world.terrainActive(source)) {
+                if (scope != null && !scope.lifetime.active) world.cancelTerrain(source)
+                true
+            } else false
+        }
         val removed = statuses.values.filter { !it.lifetime.active }
         removed.forEach(::removeStatus)
         removed.map { it.key.target }.toSet().forEach(::syncSpeed)
@@ -1990,7 +2032,7 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
         pending.removeIf { !it.scope.lifetime.active }
         chains.removeIf { !it.scope.lifetime.active }
         areas.removeIf { !it.lifetime.active }
-        val retained = pending.map { it.scope.id }.toSet() + chains.map { it.scope.id } + parallels.map { it.scope.id } + areas.map { it.scope.id } + projectiles.map { it.scope.id } + eventWaits.map { it.scope.id } + statuses.values.map { it.scope.id } +
+        val retained = terrainScopes + pending.map { it.scope.id }.toSet() + chains.map { it.scope.id } + parallels.map { it.scope.id } + areas.map { it.scope.id } + projectiles.map { it.scope.id } + eventWaits.map { it.scope.id } + statuses.values.map { it.scope.id } +
             timers.values.map { it.scope.id } + barriers.map { it.scope.id } + pendingDepletions.values.flatMap { callbacks -> callbacks.map { it.scope.id } } + passives.values.map { it.id } + toggles.values.map { it.id } + channels.values.map { it.scope.id } + recasts.values.map { it.scope.id }
         scopes.entries.removeIf { !it.value.lifetime.active || (releaseIdle && it.key !in retained) }
         suppressedActivations.removeIf { it !in scopes }
@@ -1998,6 +2040,8 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
     }
 
     private fun fail(scope: Scope, failure: Exception) {
+        world.cancelTerrain(scope.id)
+        terrainScopes.remove(scope.id)
         scopes[scope.id]?.lifetime?.cancelled = true
         scope.lifetime.cancelled = true
         if (failures.size >= 32) failures.removeFirst()
@@ -2086,6 +2130,28 @@ class AbilityRuntime(private val world: WorldOps, private val catalog: MechanicC
         }
         collect(effects)
         return ControllerDependencies(areaDefinitions, statusDefinitions, stateDefinitions, projectileDefinitions, createdStatuses)
+    }
+    private fun patternDependencies(effects: List<Effect>): Map<String, BlockPatternDef> {
+        val found = linkedMapOf<String, BlockPatternDef>()
+        val visited = mutableSetOf<String>()
+        fun collect(body: List<Effect>) {
+            for (effect in body.flatMap { catalog.descendants(it).toList() }) {
+                if (effect is Effect.PlacePattern)
+                    definitions.blockPatterns[effect.pattern]?.let { found[effect.pattern] = it }
+                val mechanic = catalog.mechanic(effect)
+                for (id in mechanic.areas(effect)) if (visited.add("area:$id")) definitions.areas[id]?.let {
+                    collect(it.enter + it.periodic + it.exit + it.expired)
+                }
+                for (id in mechanic.createdStatuses(effect)) if (visited.add("status:$id")) definitions.statuses[id]?.let {
+                    collect(it.bodies)
+                }
+                for (id in mechanic.projectiles(effect)) if (visited.add("projectile:$id")) definitions.projectiles[id]?.let {
+                    collect(it.bodies)
+                }
+            }
+        }
+        collect(effects)
+        return found
     }
     private fun changeResource(record: PlayerRecord, classId: String, id: String, delta: Double): Double {
         val resource = definitions.resources[id] ?: error("resource is unavailable")

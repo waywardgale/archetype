@@ -5,7 +5,7 @@
   "name": "Archetype native game tests",
   "environment": "*",
   "entrypoints": {
-    "fabric-gametest": ["dev.archetype.gametest.MovementGameTest", "dev.archetype.gametest.CombatGameTest", "dev.archetype.gametest.RestrictionGameTest"]
+    "fabric-gametest": ["dev.archetype.gametest.MovementGameTest", "dev.archetype.gametest.CombatGameTest", "dev.archetype.gametest.RestrictionGameTest", "dev.archetype.gametest.TerrainGameTest"]
   },
   "depends": {
     "archetype": "*",

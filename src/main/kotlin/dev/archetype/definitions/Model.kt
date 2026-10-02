@@ -51,6 +51,13 @@ interface Effect {
         override val resultName: String?) : Effect
     data class SafeTeleport(val target: EffectTarget, val destination: SpatialTarget,
         override val resultName: String?) : Effect
+    data class PlacePattern(val pattern: String, val at: SpatialTarget, val rotation: Int,
+        val mirror: PatternMirror, val durationTicks: Int?, val allowFluid: Boolean,
+        val allowGravity: Boolean, override val resultName: String?) : Effect
+    data class EditTerrain(val operation: TerrainOperation, val at: SpatialTarget,
+        val region: TerrainRegion, val block: String?, val filter: TerrainFilter,
+        val durationTicks: Int?, val allowFluid: Boolean, val allowGravity: Boolean,
+        val loot: Boolean, override val resultName: String?) : Effect
     data class ReadHealth(val target: EffectTarget, override val resultName: String?) : Effect
     data class Shield(
         val target: EffectTarget, val capacity: Numeric, val durationTicks: Int, val priority: Int,
@@ -134,6 +141,19 @@ enum class DashDirection { AIM, TARGET, GROUND }
 enum class ImpulseDirection { AWAY, TOWARD }
 enum class ProjectileEntities { ENEMIES, ALLIES, ANY }
 enum class ProjectileEvent { ENTITY_HIT, BLOCK_HIT, EXPIRY }
+enum class PatternMirror { NONE, X, Z }
+data class PatternCell(val x: Int, val y: Int, val z: Int, val block: String)
+data class BlockPatternDef(val id: String, val cells: List<PatternCell>)
+enum class TerrainOperation { SET, REPLACE, BREAK }
+sealed interface TerrainRegion {
+    data object Point : TerrainRegion
+    data class Line(val x: Int, val y: Int, val z: Int) : TerrainRegion
+    data class Box(val width: Int, val height: Int, val depth: Int) : TerrainRegion
+    data class Sphere(val radius: Int) : TerrainRegion
+}
+data class TerrainFilter(val blocks: Set<String> = emptySet(), val tags: Set<String> = emptySet()) {
+    val defined: Boolean get() = blocks.isNotEmpty() || tags.isNotEmpty()
+}
 data class NumberParameter(val minimum: Double, val maximum: Double, val default: Double?)
 data class ProjectileDef(
     val id: String, val speed: Double, val gravity: Double, val lifetimeTicks: Int,
@@ -244,6 +264,7 @@ data class DefinitionSet(
     val empowerments: Map<String, EmpowermentDef> = emptyMap(),
     val unlockTrees: Map<String, UnlockTreeDef> = emptyMap(),
     val specializations: Map<String, SpecializationDef> = emptyMap(),
+    val blockPatterns: Map<String, BlockPatternDef> = emptyMap(),
 )
 
 sealed interface CompileResult {

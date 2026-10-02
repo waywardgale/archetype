@@ -12,7 +12,8 @@ class GeometryCatalogTest {
         val result = ManifestCompiler().compile(PackCapture.capture(root))
         assertTrue(result is CompileResult.Valid, "$result")
         val definitions = (result as CompileResult.Valid).definitions
-        assertEquals(36, definitions.classes.getValue("workshop:validation_actor").grants.size)
+        assertEquals(38, definitions.classes.getValue("workshop:validation_actor").grants.size)
+        assertEquals(1, definitions.blockPatterns.size)
         assertEquals(1, definitions.specializations.size)
         assertEquals(2, definitions.areas.size)
         assertEquals(9, definitions.statuses.size)

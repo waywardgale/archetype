@@ -67,6 +67,7 @@ class ManifestCompiler(private val catalog: MechanicCatalog = BuiltinEffects.cat
         val areas = linkedMapOf<String, AreaDef>()
         val statuses = linkedMapOf<String, StatusDef>()
         val projectiles = linkedMapOf<String, ProjectileDef>()
+        val blockPatterns = linkedMapOf<String, BlockPatternDef>()
         val progressionTracks = linkedMapOf<String, ProgressionTrackDef>()
         val empowerments = linkedMapOf<String, EmpowermentDef>()
         val unlockTrees = linkedMapOf<String, UnlockTreeDef>()
@@ -86,6 +87,7 @@ class ManifestCompiler(private val catalog: MechanicCatalog = BuiltinEffects.cat
                     "area" -> areas[id] = parseArea(doc.data, id, pack)
                     "status" -> statuses[id] = parseStatus(doc.data, id, pack)
                     "projectile" -> projectiles[id] = parseProjectile(doc.data, id, pack)
+                    "block_pattern" -> blockPatterns[id] = parseBlockPattern(doc.data, id)
                     "progression_track" -> progressionTracks[id] = parseProgressionTrack(doc.data, id, pack)
                     "empowerment" -> empowerments[id] = parseEmpowerment(doc.data, id, pack)
                     "unlock_tree" -> unlockTrees[id] = parseUnlockTree(doc.data, id, pack)
@@ -162,6 +164,7 @@ class ManifestCompiler(private val catalog: MechanicCatalog = BuiltinEffects.cat
             if (conflict) errors += Diagnostic("packs", "modifiers", "ambiguous replacement for ${target.first} at priority ${target.second}")
         }
         if (projectiles.size > 256) errors += Diagnostic("packs", "projectiles", "at most 256 projectiles are supported")
+        if (blockPatterns.size > 256) errors += Diagnostic("packs", "block_patterns", "at most 256 block patterns are supported")
         if (progressionTracks.size > 128) errors += Diagnostic("packs", "progression_tracks", "at most 128 progression tracks are supported")
         for ((id, track) in progressionTracks) for (classId in track.classes)
             if (classId !in classes) errors += Diagnostic(id, "classes", "unknown class $classId")
@@ -243,6 +246,8 @@ class ManifestCompiler(private val catalog: MechanicCatalog = BuiltinEffects.cat
             projectiles.mapValues { it.value.bodies }
         val declaredGroups = (abilities.values + authoredGrants.map(Grant::ability)).flatMap { it.cooldownGroups }.toSet()
         for ((id, effects) in bodies) for (effect in effects.flatMap { catalog.descendants(it).toList() }) {
+            if (effect is Effect.PlacePattern && effect.pattern !in blockPatterns)
+                errors += Diagnostic(id, "effects.pattern", "unknown block pattern ${effect.pattern}")
             if (effect is Effect.ReduceGroupCooldown && effect.group !in declaredGroups)
                 errors += Diagnostic(id, "effects.group", "unknown cooldown group ${effect.group}")
             if (effect is Effect.Dash && effect.distance is Numeric.Constant && effect.distance.value !in 0.01..32.0)
@@ -398,7 +403,53 @@ class ManifestCompiler(private val catalog: MechanicCatalog = BuiltinEffects.cat
         }
         (areas.keys + statuses.keys + projectiles.keys).forEach(::visitController)
         if (errors.isNotEmpty()) return CompileResult.Invalid(errors)
-        return CompileResult.Valid(DefinitionSet(packs, resources, abilities, classes, snapshot.fingerprint, areas, statuses, states, projectiles, progressionTracks, empowerments, unlockTrees, specializations))
+        return CompileResult.Valid(DefinitionSet(packs, resources, abilities, classes, snapshot.fingerprint, areas, statuses, states, projectiles, progressionTracks, empowerments, unlockTrees, specializations, blockPatterns))
+    }
+
+    private fun parseBlockPattern(m: Map<String, Any?>, id: String): BlockPatternDef {
+        m.only(setOf("kind", "id", "origin", "palette", "layers"), "$")
+        val origin = (m["origin"] as? List<*>) ?: bad("origin", "expected [x, y, z]")
+        if (origin.size != 3 || origin.any { it !is Int && it !is Long } || origin.any { (it as Number).toLong() !in 0L..15L })
+            bad("origin", "expected three cell indices from 0 to 15")
+        val offset = origin.map { (it as Number).toInt() }
+        val palette = m["palette"].asMap("palette", "palette")
+        if (palette.isEmpty() || palette.size > 32) bad("palette", "expected 1..32 symbols")
+        val symbols = palette.mapValues { (symbol, raw) ->
+            if (symbol.length != 1) bad("palette.$symbol", "symbol must be one character")
+            val entry = raw.asMap("palette.$symbol", "palette.$symbol")
+            entry.only(setOf("block", "skip"), "palette.$symbol")
+            if (("block" in entry) == ("skip" in entry)) bad("palette.$symbol", "expected exactly one block or skip")
+            if ("skip" in entry) {
+                if (entry["skip"] != true) bad("palette.$symbol.skip", "skip must be true")
+                null
+            } else entry.string("block", "palette.$symbol").also {
+                if (it.length > 256 || !Regex("[a-z0-9_.-]+:[a-z0-9_./-]+(?:\\[[a-z0-9_=,.-]+])?").matches(it))
+                    bad("palette.$symbol.block", "invalid block-state syntax")
+            }
+        }
+        val layers = m["layers"] as? List<*> ?: bad("layers", "expected a list of layers")
+        if (layers.size !in 1..16) bad("layers", "expected 1..16 layers")
+        var width = -1
+        var depth = -1
+        val cells = mutableListOf<PatternCell>()
+        for ((y, rawLayer) in layers.withIndex()) {
+            val rows = rawLayer as? List<*> ?: bad("layers.$y", "expected a list of rows")
+            if (rows.size !in 1..16 || (depth != -1 && rows.size != depth)) bad("layers.$y", "layers must have 1..16 matching rows")
+            depth = rows.size
+            for ((z, rawRow) in rows.withIndex()) {
+                val row = rawRow as? String ?: bad("layers.$y.$z", "expected a symbol row")
+                if (row.length !in 1..16 || (width != -1 && row.length != width)) bad("layers.$y.$z", "rows must have 1..16 matching symbols")
+                width = row.length
+                for ((x, symbol) in row.withIndex()) {
+                    if (symbol.toString() !in symbols) bad("layers.$y.$z", "undeclared palette symbol $symbol")
+                    symbols[symbol.toString()]?.let { cells += PatternCell(x - offset[0], y - offset[1], z - offset[2], it) }
+                }
+            }
+        }
+        if (offset[0] >= width || offset[1] >= layers.size || offset[2] >= depth)
+            bad("origin", "origin must lie within the pattern")
+        if (cells.isEmpty() || cells.size > 256) bad("layers", "expected 1..256 edited cells")
+        return BlockPatternDef(id, cells)
     }
 
     private fun parsePack(doc: Doc): Pack {
@@ -1148,7 +1199,7 @@ class ManifestCompiler(private val catalog: MechanicCatalog = BuiltinEffects.cat
         val identity = m["id"]?.asString("$field.id") ?: field
         if ("id" in m && (identity.length > 128 || !LOCAL_ID.matches(identity))) bad("$field.id", "invalid effect identity")
         if (name != null && !Regex("[a-z0-9_]{1,64}").matches(name)) bad("$field.as", "result name must use lowercase letters, digits or underscores")
-        return mechanic.decode(object : EffectReader {
+        return try { mechanic.decode(object : EffectReader {
             override val resultName = name
             override val identity = identity
             override fun has(key: String) = key in m
@@ -1243,7 +1294,63 @@ class ManifestCompiler(private val catalog: MechanicCatalog = BuiltinEffects.cat
                 return if ("position" in anchor) Anchor.Fixed(parseSpatial(anchor.string("position", "$field.$key"), "$field.$key.position"))
                 else Anchor.Attached(parseTarget(anchor.string("attached", "$field.$key"), "$field.$key.attached"))
             }
-        })
+            override fun terrainRegion(key: String): TerrainRegion = parseTerrainRegion(m[key], "$field.$key")
+            override fun terrainFilter(key: String): TerrainFilter = parseTerrainFilter(m[key], "$field.$key")
+        }) } catch (failure: IllegalArgumentException) {
+            bad(field, failure.message ?: "invalid effect")
+        }
+    }
+
+    private fun parseTerrainRegion(value: Any?, field: String): TerrainRegion {
+        val m = value.asMap(field, field)
+        return when (m.string("type", field)) {
+            "point" -> { m.only(setOf("type"), field); TerrainRegion.Point }
+            "line" -> {
+                m.only(setOf("type", "to"), field)
+                val vector = terrainInts(m["to"], "$field.to", 3, -16..16)
+                if (vector.all { it == 0 }) bad("$field.to", "line endpoint must differ from its origin")
+                TerrainRegion.Line(vector[0], vector[1], vector[2])
+            }
+            "box" -> {
+                m.only(setOf("type", "size"), field)
+                val size = terrainInts(m["size"], "$field.size", 3, 1..16)
+                if (size.fold(1L) { total, dimension -> total * dimension } > 256L)
+                    bad("$field.size", "box may edit at most 256 cells")
+                TerrainRegion.Box(size[0], size[1], size[2])
+            }
+            "sphere" -> {
+                m.only(setOf("type", "radius"), field)
+                val radius = m.integer("radius", field)
+                if (radius !in 1..3) bad("$field.radius", "sphere radius must be 1..3")
+                TerrainRegion.Sphere(radius)
+            }
+            else -> bad("$field.type", "supported terrain regions are point, line, box, and sphere")
+        }
+    }
+
+    private fun terrainInts(value: Any?, field: String, count: Int, range: IntRange): List<Int> {
+        val list = value as? List<*> ?: bad(field, "expected a coordinate list")
+        if (list.size != count || list.any { it !is Int && it !is Long } ||
+            list.any { (it as Number).toLong() !in range.first.toLong()..range.last.toLong() })
+            bad(field, "expected $count integers in ${range.first}..${range.last}")
+        return list.map { (it as Number).toInt() }
+    }
+
+    private fun parseTerrainFilter(value: Any?, field: String): TerrainFilter {
+        val m = value.asMap(field, field)
+        m.only(setOf("blocks", "tags"), field)
+        fun ids(key: String): Set<String> {
+            val values = m.listOrEmpty(key, field)
+            if (values.size > 32) bad("$field.$key", "at most 32 filters are supported")
+            return values.mapIndexed { index, raw ->
+                raw.asString("$field.$key.$index").also {
+                    if (it.length > 128 || !GLOBAL_ID.matches(it)) bad("$field.$key.$index", "expected a namespaced ID")
+                }
+            }.toSet()
+        }
+        val filter = TerrainFilter(ids("blocks"), ids("tags"))
+        if (!filter.defined) bad(field, "filter needs at least one block or tag")
+        return filter
     }
 
     private fun parseTarget(text: String, field: String): EffectTarget = when (text) {

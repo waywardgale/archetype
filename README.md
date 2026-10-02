@@ -26,6 +26,7 @@ The current build also shows grant charges and their next recharge. [Timers and 
 [Form authoring](docs/form-authoring.md) covers timed complete ability replacement and restoration.
 [Progression authoring](docs/progression-authoring.md) covers the current XP, point-award, talent, and empowerment subset.
 [Specialization authoring](docs/specialization-authoring.md) covers class-bound grants, saved choices, and specialization-specific talent trees.
+[Terrain authoring](docs/terrain-authoring.md) covers block palettes, filtered region edits, temporary ownership, and permanent breaks.
 
 Operators can run `/archetype inspect [online-player-name]` to see the current server generation, active class, resolved grants, resources, declared state, and active statuses, timers, and barriers. `/archetype diagnostics` shows rejected manifest edits.
 
